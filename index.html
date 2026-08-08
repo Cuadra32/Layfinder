@@ -264,6 +264,7 @@
    CONSTANTS
    ══════════════════════════════════════════════ */
 var PROXY = '/api/racing-proxy?url=';
+var RACECARDS_API = '/api/racecards';
 var RP_BASE = 'https://www.racingpost.com';
 var UK_COURSES = ['ascot','ayr','bath','beverley','brighton','carlisle','catterick','chelmsford','chelmsford city','chester','chepstow','doncaster','epsom','epsom downs','ffos las','goodwood','hamilton','haydock','haydock park','kempton','kempton park','leicester','lingfield','lingfield park','musselburgh','newbury','newcastle','newmarket','nottingham','pontefract','redcar','ripon','salisbury','sandown','sandown park','southwell','thirsk','wetherby','windsor','wolverhampton','yarmouth','york'];
 var JUMP_COURSES = ['aintree','bangor','bangor-on-dee','cartmel','cheltenham','exeter','fakenham','fontwell','fontwell park','hereford','hexham','huntingdon','kelso','ludlow','market rasen','newton abbot','perth','plumpton','sedgefield','stratford','taunton','towcester','uttoxeter','warwick','wincanton','worcester'];
@@ -362,10 +363,82 @@ async function proxyFetch(rpUrl){
   return r.text();
 }
 
+/* ── RSC payload extraction (Next.js 13+ React Server Components) ── */
+function extractRSCPayloads(htmlOrText){
+  var jsonObjects=[];
+  var allText='';
+
+  /* Find self.__next_f.push() calls */
+  var re=/self\.__next_f\.push\(\[\d+,"((?:[^"\\]|\\.)*)"\]\)/g;
+  var m;
+  while((m=re.exec(htmlOrText))!==null){
+    var raw=m[1];
+    var unescaped;
+    try{
+      unescaped=JSON.parse('"'+raw+'"');
+    }catch(e){
+      unescaped=raw.replace(/\\n/g,'\n').replace(/\\t/g,'\t')
+        .replace(/\\"/g,'"').replace(/\\\//g,'/').replace(/\\\\/g,'\\');
+    }
+    allText+=unescaped+'\n';
+  }
+
+  if(!allText)return{objects:jsonObjects,text:allText};
+
+  /* Parse RSC line format: N:data */
+  var lines=allText.split('\n');
+  for(var i=0;i<lines.length;i++){
+    var line=lines[i].trim();
+    if(!line)continue;
+    var colonIdx=line.indexOf(':');
+    if(colonIdx<0||colonIdx>6)continue;
+    var prefix=line.substring(0,colonIdx);
+    if(!/^[\da-fA-F]+$/.test(prefix))continue;
+    var data=line.substring(colonIdx+1);
+    if(data.length>2&&(data.charAt(0)==='{'||data.charAt(0)==='[')){
+      try{
+        var parsed=JSON.parse(data);
+        jsonObjects.push(parsed);
+      }catch(e){
+        /* Try to walk RSC element arrays ["$","div",null,{...}] */
+        if(data.charAt(0)==='['){
+          try{
+            var arr=JSON.parse(data);
+            walkRSCArray(arr,jsonObjects);
+          }catch(e2){}
+        }
+      }
+    }
+  }
+
+  return{objects:jsonObjects,text:allText};
+}
+
+function walkRSCArray(arr,results,depth){
+  if(!Array.isArray(arr))return;
+  if(!depth)depth=0;
+  if(depth>8)return;
+  for(var i=0;i<arr.length;i++){
+    var item=arr[i];
+    if(item&&typeof item==='object'&&!Array.isArray(item)){
+      results.push(item);
+    }
+    if(Array.isArray(item)){
+      walkRSCArray(item,results,depth+1);
+    }
+  }
+}
+
+/* Unescape HTML for regex searches (handles RSC/Next.js escaped URLs) */
+function unescapeForSearch(html){
+  return html.replace(/\\+\//g,'/');
+}
+
 /* Parse meetings page → array of race links */
 function parseMeetingsPage(html){
   var doc = new DOMParser().parseFromString(html,'text/html');
   var races = [];
+  var htmlSearch = unescapeForSearch(html);
 
   /* Strategy 0: check for __NEXT_DATA__ or JSON with race links */
   var scripts=doc.querySelectorAll('script');
@@ -403,16 +476,59 @@ function parseMeetingsPage(html){
     }
   });
 
-  /* Strategy 2: search the whole HTML for URL patterns */
+  /* Strategy 2: search UNESCAPED HTML for URL patterns (catches RSC payloads) */
   if(!races.length){
-    var urlRe = /\/racecards\/(\d+)\/([^"'\s/]+)\/(\d{4}-\d{2}-\d{2})\/(\d+)/g;
+    var urlRe = /\/racecards\/(\d+)\/([a-z][a-z0-9-]+)\/(\d{4}-\d{2}-\d{2})\/(\d+)/gi;
     var m;
-    while((m=urlRe.exec(html))!==null){
+    while((m=urlRe.exec(htmlSearch))!==null){
       var href=m[0];
       if(!races.some(function(r){return r.href===href})){
         races.push({href:href,text:m[2].replace(/-/g,' ')});
       }
     }
+  }
+
+  /* Strategy 3: extract RSC payloads and search their text */
+  if(!races.length){
+    var rsc=extractRSCPayloads(html);
+    if(rsc.text){
+      addDebugInfo([{source:'RSC payloads found',textLength:rsc.text.length,objectCount:rsc.objects.length}]);
+      var urlRe3=/\/racecards\/(\d+)\/([a-z][a-z0-9-]+)\/(\d{4}-\d{2}-\d{2})\/(\d+)/gi;
+      var m3;
+      while((m3=urlRe3.exec(rsc.text))!==null){
+        var href3=m3[0];
+        if(!races.some(function(r){return r.href===href3})){
+          races.push({href:href3,text:m3[2].replace(/-/g,' ')});
+        }
+      }
+    }
+  }
+
+  /* Strategy 4: search all script textContent (unescaped) */
+  if(!races.length){
+    for(var si2=0;si2<scripts.length;si2++){
+      var stxt2=unescapeForSearch(scripts[si2].textContent||'');
+      var urlRe4=/\/racecards\/(\d+)\/([a-z][a-z0-9-]+)\/(\d{4}-\d{2}-\d{2})\/(\d+)/gi;
+      var m4;
+      while((m4=urlRe4.exec(stxt2))!==null){
+        var href4=m4[0];
+        if(!races.some(function(r){return r.href===href4})){
+          races.push({href:href4,text:m4[2].replace(/-/g,' ')});
+        }
+      }
+    }
+  }
+
+  if(!races.length){
+    addDebugInfo([{
+      source:'parseMeetingsPage failed',
+      htmlLength:html.length,
+      scriptCount:scripts.length,
+      hasNextData:html.indexOf('__NEXT_DATA__')>=0,
+      hasRSC:html.indexOf('self.__next_f')>=0,
+      racecardsCount:(html.match(/racecards/gi)||[]).length,
+      htmlSnippet:html.substring(0,3000)
+    }]);
   }
 
   return races;
@@ -483,6 +599,36 @@ function parseRacePageMulti(html){
     }
   }
 
+  /* ── Try RSC payloads (Next.js 13+ React Server Components) ── */
+  var rsc=extractRSCPayloads(doc.documentElement?doc.documentElement.innerHTML:html);
+  if(rsc.objects.length){
+    debugInfo.push({source:'RSC payloads',objectCount:rsc.objects.length,
+      sampleKeys:rsc.objects.slice(0,5).map(function(o){return Object.keys(o).slice(0,10).join(',')})});
+    for(var ri=0;ri<rsc.objects.length;ri++){
+      var rscObj=rsc.objects[ri];
+      if(rscObj&&typeof rscObj==='object'){
+        var multiRSC=extractAllRacesFromJSON(rscObj);
+        if(multiRSC.length){
+          addDebugInfo(debugInfo);
+          return multiRSC;
+        }
+      }
+    }
+    /* Try combining all RSC objects and walking them */
+    var rscCombined={_rscData:rsc.objects};
+    var multiRSCAll=extractAllRacesFromJSON(rscCombined);
+    if(multiRSCAll.length){addDebugInfo(debugInfo);return multiRSCAll}
+
+    /* Try text extraction from RSC payload text */
+    if(rsc.text&&!allResults.length){
+      var rscTextResult=parseRacecardText(rsc.text);
+      if(rscTextResult.horses.length>=2){
+        debugInfo.push({source:'RSC text parse',horses:rscTextResult.horses.length});
+        allResults.push(rscTextResult);
+      }
+    }
+  }
+
   if(allResults.length){addDebugInfo(debugInfo);return allResults}
 
   /* ── Parse visible page text ── */
@@ -531,14 +677,15 @@ function findAllRunnerArrays(obj, depth, parentRaceInfo, results){
   if(!results)results=[];
   if(!obj||typeof obj!=='object') return results;
   if(depth===undefined) depth=0;
-  if(depth>12) return results;
+  if(depth>15) return results;
 
   var ri = gatherRaceInfo(obj);
   var merged=mergeRaceInfo(parentRaceInfo,ri);
 
   /* Check for runner arrays at this level */
   var arrKeys = ['runners','horses','Runners','Horses','cards','entries','runners_list',
-    'runnersData','horseList','raceRunners','participants','starters','selections'];
+    'runnersData','horseList','raceRunners','participants','starters','selections',
+    'racecard','runnerList'];
   var foundHere=false;
   for(var k=0;k<arrKeys.length;k++){
     var arr=obj[arrKeys[k]];
@@ -594,16 +741,22 @@ function findRunnerArray(obj, depth, parentRaceInfo){
 
 /* Heuristic: does an array look like it contains runner/horse objects? */
 function looksLikeRunners(arr){
-  var first=arr[0];if(!first||typeof first!=='object')return false;
-  var keys=Object.keys(first).join(' ').toLowerCase();
-  /* Must have something that smells like a horse */
-  var horseSignals=['horse','name','runner','silk','jockey','trainer','saddlecloth',
-    'saddle','draw','form','odds','cloth','number','uid','runnerId','horseId'];
+  /* Check first few items */
   var hits=0;
-  for(var i=0;i<horseSignals.length;i++){
-    if(keys.indexOf(horseSignals[i])>=0)hits++;
+  var signals=['horse','name','runner','silk','jockey','trainer','saddlecloth',
+    'saddle','draw','form','odds','cloth','number','uid','runnerid','horseid',
+    'horsename','runnername','formfigures','saddleclothnumber'];
+  for(var ai=0;ai<Math.min(arr.length,3);ai++){
+    var item=arr[ai];
+    if(!item||typeof item!=='object')return false;
+    var keys=Object.keys(item).join(' ').toLowerCase();
+    var itemHits=0;
+    for(var i=0;i<signals.length;i++){
+      if(keys.indexOf(signals[i])>=0)itemHits++;
+    }
+    if(itemHits>=2)hits++;
   }
-  return hits>=2;
+  return hits>=1;
 }
 
 /* Extract race-level info from an object node */
@@ -627,7 +780,7 @@ function gatherRaceInfo(obj){
     if(typeof v==='string'&&v){
       var tm=v.match(/(\d{1,2})[:.]\s?(\d{2})/);
       if(tm){ri.time=tm[1]+':'+tm[2];break}
-      if(v.length<=5){ri.time=v;break}
+      if(v.length<=5&&/^\d/.test(v)){ri.time=v;break}
     }
   }
   /* Description */
@@ -863,8 +1016,20 @@ function filterUKFlat(results){
     var combined=courseLower+' '+descLower;
     /* Check if it's a UK course */
     var isUK=UK_COURSES.some(function(c){return courseLower.indexOf(c)>=0});
-    /* If no course name, keep it (we can't filter what we don't know) */
-    if(!courseLower)isUK=true;
+    /* If no course name, check trainer names for non-UK indicators */
+    if(!courseLower){
+      /* If ALL trainers look non-UK (Australian, etc.), skip */
+      var trainers=(r.horses||[]).map(function(h){return(h.trainer||'').toLowerCase()});
+      var ausTrainers=['chris waller','michael freedman','john o\'shea','gai waterhouse',
+        'james cummings','peter moody','ciaron maher','david hayes','aidan o\'brien'];
+      var nonUKCount=0;
+      trainers.forEach(function(t){
+        if(ausTrainers.some(function(a){return t.indexOf(a)>=0}))nonUKCount++;
+      });
+      /* If more than half of trainers look non-UK, probably not a UK race */
+      if(trainers.length>2&&nonUKCount>trainers.length/2)return false;
+      isUK=true;
+    }
     /* Check if it's jump racing */
     var isJump=JUMP_RE.test(combined)||JUMP_COURSES.some(function(c){return courseLower.indexOf(c)>=0});
     return isUK&&!isJump;
@@ -996,23 +1161,54 @@ async function loadToday(){
   showLoad('Fetching today\'s racecards from Racing Post…');
   document.getElementById('todayBtn').disabled=true;
   allRunnerData=[];
+  _debugLog=[];
 
   try{
-    /* ── Strategy 1: try to get ALL races directly from the racecards page ── */
+    /* ── Strategy A: Use the smart server-side API endpoint ── */
+    showLoad('Loading racecards via smart API…');
+    try{
+      var apiResp = await fetch(RACECARDS_API);
+      if(apiResp.ok){
+        var apiData = await apiResp.json();
+        addDebugInfo([{source:'API response',method:apiData.method,raceCount:(apiData.races||[]).length,debug:apiData.debug}]);
+
+        if(apiData.races && apiData.races.length){
+          /* Convert API response to our internal format */
+          var apiResults = apiData.races.map(function(race){
+            return{
+              horses:race.horses||[],
+              raceInfo:{course:race.course||'',time:race.time||'',desc:race.desc||''}
+            };
+          }).filter(function(r){return r.horses.length>=2});
+
+          if(apiResults.length>=1){
+            hideLoad();
+            renderHorses(apiResults);
+            return;
+          }
+        }
+        /* API returned no races — fall through to client-side approach */
+        addDebugInfo([{source:'API returned no usable races, trying client-side'}]);
+      }
+    }catch(apiErr){
+      addDebugInfo([{source:'API error',error:apiErr.message}]);
+    }
+
+    /* ── Strategy B: Client-side parsing (fallback) ── */
+    showLoad('Trying client-side parsing…');
     var html = await proxyFetch(RP_BASE+'/racecards/');
     showLoad('Parsing racecards data…');
 
+    /* Try to parse races directly from page data */
     var directResults = parseRacePageMulti(html);
-    /* Filter for UK flat only */
     directResults = filterUKFlat(directResults);
     if(directResults.length>=3){
-      /* Got multiple races directly — no need to fetch individual pages */
       hideLoad();
       renderHorses(directResults);
       return;
     }
 
-    /* ── Strategy 2: find race URLs and fetch each one ── */
+    /* Find race URLs and fetch each one */
     showLoad('Finding individual race links…');
     var raceLinks = parseMeetingsPage(html);
 
@@ -1022,7 +1218,6 @@ async function loadToday(){
       return;
     }
 
-    /* If we got some direct results but not enough links, show what we have */
     if(!raceLinks.length&&directResults.length){
       hideLoad();
       renderHorses(directResults);
@@ -1037,9 +1232,15 @@ async function loadToday(){
       return isUK&&!isJump;
     });
 
-    /* De-duplicate by href */
+    /* De-duplicate by race ID (last segment of URL) */
     var seen={};
-    ukFlat=ukFlat.filter(function(r){if(seen[r.href])return false;seen[r.href]=true;return true});
+    ukFlat=ukFlat.filter(function(r){
+      var raceId=r.href.match(/\/(\d+)$/);
+      var key=raceId?raceId[1]:r.href;
+      if(seen[key])return false;
+      seen[key]=true;
+      return true;
+    });
 
     if(!ukFlat.length){
       hideLoad();
@@ -1051,45 +1252,59 @@ async function loadToday(){
       return;
     }
 
+    addDebugInfo([{source:'UK flat URLs found',count:ukFlat.length,
+      courses:ukFlat.map(function(r){return courseFromUrl(r.href)}).filter(function(v,i,a){return a.indexOf(v)===i})}]);
+
     showLoad('Loading '+ukFlat.length+' UK flat races…');
 
-    var results=directResults.slice(); /* start with any direct results */
+    var results=directResults.slice();
     var seenHorseKeys={};
-    /* Mark existing results as seen */
     results.forEach(function(r){
       var hKey=r.horses.map(function(h){return(h.name||'').toLowerCase()}).sort().join('|');
       if(hKey)seenHorseKeys[hKey]=true;
     });
 
-    for(var i=0;i<ukFlat.length;i++){
-      showLoad('Loading race '+(i+1)+' of '+ukFlat.length+'…');
-      try{
-        var raceHtml = await proxyFetch(RP_BASE+ukFlat[i].href);
+    /* Fetch races in parallel batches of 4 */
+    var BATCH=4;
+    for(var bi=0;bi<ukFlat.length;bi+=BATCH){
+      var batch=ukFlat.slice(bi,bi+BATCH);
+      showLoad('Loading races '+(bi+1)+'–'+Math.min(bi+BATCH,ukFlat.length)+' of '+ukFlat.length+'…');
+
+      var fetches=batch.map(function(r){
+        return proxyFetch(RP_BASE+r.href).then(function(raceHtml){
+          return{url:r,html:raceHtml};
+        }).catch(function(){return null});
+      });
+
+      var batchResults=await Promise.all(fetches);
+
+      for(var br=0;br<batchResults.length;br++){
+        if(!batchResults[br])continue;
+        var raceUrl=batchResults[br].url;
+        var raceHtml=batchResults[br].html;
+
         var allParsed = parseRacePageMulti(raceHtml);
         if(!allParsed.length) continue;
+
         for(var ap=0;ap<allParsed.length;ap++){
           var parsed=allParsed[ap];
           if(!parsed||!parsed.horses.length)continue;
-          /* Extract course name from URL slug if not in parsed data */
           if(!parsed.raceInfo.course||parsed.raceInfo.course===''){
-            parsed.raceInfo.course=courseFromUrl(ukFlat[i].href);
+            parsed.raceInfo.course=courseFromUrl(raceUrl.href);
           }
-          /* Extract time from URL text if missing */
-          if(!parsed.raceInfo.time&&ukFlat[i].text){
-            var tm=ukFlat[i].text.match(/(\d{1,2})[:.]\s?(\d{2})/);
+          if(!parsed.raceInfo.time&&raceUrl.text){
+            var tm=raceUrl.text.match(/(\d{1,2})[:.]\s?(\d{2})/);
             if(tm)parsed.raceInfo.time=tm[1]+':'+tm[2];
           }
-          /* Deduplicate: skip if exact same set of horse names */
           var hKey=parsed.horses.map(function(h){return(h.name||'').toLowerCase()}).sort().join('|');
           if(hKey&&!seenHorseKeys[hKey]){
             seenHorseKeys[hKey]=true;
             results.push(parsed);
           }
         }
-      }catch(e){/* skip failed races */}
+      }
     }
 
-    /* Filter for UK flat */
     results=filterUKFlat(results);
 
     if(!results.length){
