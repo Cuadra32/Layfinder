@@ -630,6 +630,13 @@ function extractRunnerArray(arr, raceInfo){
   if(arr.length>0){
     console.log('[LayFinder] First runner keys:', Object.keys(arr[0]));
     console.log('[LayFinder] First runner sample:', JSON.stringify(arr[0]).substring(0,800));
+    addDebugInfo([{
+      source:'runner keys',
+      snippet:Object.keys(arr[0]).join(', ')
+    },{
+      source:'first runner (full)',
+      snippet:JSON.stringify(arr[0]).substring(0,2000)
+    }]);
   }
 
   var horses = arr.map(function(r){
@@ -647,10 +654,29 @@ function extractRunnerArray(arr, raceInfo){
     /* ── Form ── */
     var form = deepFind(r,['form','formFigures','recentForm','form_figures',
       'recent_form','formFig','formGuide','last_form','raceForm','formString',
-      'formWatch','formData']) || '';
-    if(typeof form==='object'&&form){form=form.figures||form.form||form.recent||''}
-    /* If form is an array, join it */
-    if(Array.isArray(form)){form=form.join('')}
+      'formWatch','formData','pastResults','figures','formatedForm','formattedForm',
+      'pastForm','resultForm','lifetimeForm']) || '';
+    if(typeof form==='object'&&form){
+      form=form.figures||form.form||form.recent||form.flat||form.allWeather||
+        form.turf||form.last6||form.last5||form.summary||'';
+    }
+    /* If form is an array, join positions */
+    if(Array.isArray(form)){
+      form=form.map(function(f){
+        if(typeof f==='object'&&f){return f.position||f.pos||f.finishPosition||f.placing||''}
+        return f;
+      }).join('');
+    }
+    /* Deep search: look in ALL string values for form-like patterns */
+    if(!form){
+      var allStrings=getAllStrings(r);
+      for(var fi=0;fi<allStrings.length;fi++){
+        var sv=allStrings[fi];
+        if(sv.length>=2&&sv.length<=15&&/^[0-9FPURSCBOfpurscbo\/-]+$/.test(sv)&&/\d/.test(sv)){
+          form=sv;break;
+        }
+      }
+    }
 
     /* ── Odds ── */
     var oddsStr='', oddsDec=null;
@@ -745,6 +771,24 @@ function extractRunnerArray(arr, raceInfo){
   return{horses:horses,raceInfo:raceInfo};
 }
 
+/* Get all string values from an object (shallow + 1 level deep) */
+function getAllStrings(obj){
+  var out=[];
+  if(!obj||typeof obj!=='object')return out;
+  var keys=Object.keys(obj);
+  for(var i=0;i<keys.length;i++){
+    var v=obj[keys[i]];
+    if(typeof v==='string'&&v.length>0)out.push(v);
+    else if(v&&typeof v==='object'&&!Array.isArray(v)){
+      var subkeys=Object.keys(v);
+      for(var j=0;j<subkeys.length;j++){
+        if(typeof v[subkeys[j]]==='string')out.push(v[subkeys[j]]);
+      }
+    }
+  }
+  return out;
+}
+
 /* Deep-find: check a key on the object, case-insensitive match */
 function deepFind(obj, keys){
   if(!obj||typeof obj!=='object')return null;
@@ -773,6 +817,16 @@ function fracToDec(s){
   var m=s.match(/(\d+)\/(\d+)/);
   if(!m)return null;
   return(+m[1]/ +m[2])+1;
+}
+
+/* Extract course name from a Racing Post URL slug */
+function courseFromUrl(href){
+  /* Pattern: /racecards/{id}/{course-slug}/{date}/{raceId} */
+  var m=href.match(/\/racecards\/\d+\/([^/]+)\//);
+  if(!m)return'';
+  var slug=m[1].replace(/-/g,' ');
+  /* Title-case */
+  return slug.replace(/\b\w/g,function(c){return c.toUpperCase()});
 }
 
 /* ══════════════════════════════════════════════
@@ -928,12 +982,29 @@ async function loadToday(){
     showLoad('Loading '+ukFlat.length+' UK flat races…');
 
     var results=[];
+    var seenHorseKeys={};
     for(var i=0;i<ukFlat.length;i++){
       showLoad('Loading race '+(i+1)+' of '+ukFlat.length+'…');
       try{
         var raceHtml = await proxyFetch(RP_BASE+ukFlat[i].href);
         var parsed = parseRacePage(raceHtml);
-        if(parsed&&parsed.horses.length) results.push(parsed);
+        if(parsed&&parsed.horses.length){
+          /* Extract course name from URL slug if not in parsed data */
+          if(!parsed.raceInfo.course||parsed.raceInfo.course===''){
+            parsed.raceInfo.course=courseFromUrl(ukFlat[i].href);
+          }
+          /* Extract time from URL text if missing */
+          if(!parsed.raceInfo.time&&ukFlat[i].text){
+            var tm=ukFlat[i].text.match(/(\d{1,2})[:.]\s?(\d{2})/);
+            if(tm)parsed.raceInfo.time=tm[1]+':'+tm[2];
+          }
+          /* Deduplicate: skip if exact same set of horse names */
+          var hKey=parsed.horses.map(function(h){return(h.name||'').toLowerCase()}).sort().join('|');
+          if(hKey&&!seenHorseKeys[hKey]){
+            seenHorseKeys[hKey]=true;
+            results.push(parsed);
+          }
+        }
       }catch(e){/* skip failed races */}
     }
 
@@ -974,6 +1045,10 @@ async function loadUrl(){
       hideLoad();
       msg('Could not extract runner data from that page. Try pasting the racecard text instead.','warn');
       return;
+    }
+    /* Extract course name from URL if not in parsed data */
+    if(!parsed.raceInfo.course||parsed.raceInfo.course===''){
+      parsed.raceInfo.course=courseFromUrl(url);
     }
     hideLoad();
     renderHorses([parsed]);
