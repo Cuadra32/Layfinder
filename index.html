@@ -418,13 +418,18 @@ function parseMeetingsPage(html){
   return races;
 }
 
-/* Parse a single race page → horse data */
+/* Parse a page for race data — can return one or many races */
 function parseRacePage(html){
-  var doc = new DOMParser().parseFromString(html,'text/html');
-  var horses = [];
-  var raceInfo = {course:'',time:'',desc:''};
+  var multi = parseRacePageMulti(html);
+  return multi.length ? multi[0] : {horses:[],raceInfo:{}};
+}
 
-  /* ── Try embedded JSON first (Next.js __NEXT_DATA__ or similar) ── */
+/* Parse a page and return ALL races found in the HTML */
+function parseRacePageMulti(html){
+  var doc = new DOMParser().parseFromString(html,'text/html');
+  var allResults=[];
+
+  /* ── Try embedded JSON first ── */
   var scripts = doc.querySelectorAll('script');
   var debugInfo=[];
   for(var i=0;i<scripts.length;i++){
@@ -436,11 +441,18 @@ function parseRacePage(html){
         var json = scripts[i].id==='__NEXT_DATA__'
           ? JSON.parse(txt)
           : JSON.parse(txt.match(/__NEXT_DATA__\s*=\s*(\{[\s\S]+?\})\s*;?\s*$/m)[1]);
-        debugInfo.push({source:'__NEXT_DATA__',snippet:JSON.stringify(json).substring(0,1500)});
+        debugInfo.push({source:'__NEXT_DATA__',snippet:JSON.stringify(json).substring(0,2000)});
+        /* Extract ALL races from JSON */
+        var multiExtracted = extractAllRacesFromJSON(json);
+        if(multiExtracted.length){
+          addDebugInfo(debugInfo);
+          return multiExtracted;
+        }
+        /* Fallback to single */
         var extracted = extractNextData(json);
         if(extracted && extracted.horses.length){
           addDebugInfo(debugInfo);
-          return extracted;
+          return [extracted];
         }
       }catch(e){debugInfo.push({source:'__NEXT_DATA__ parse error',error:e.message})}
     }
@@ -452,52 +464,60 @@ function parseRacePage(html){
       try{
         var state = JSON.parse(sm[2]);
         debugInfo.push({source:'window.'+sm[1],snippet:JSON.stringify(state).substring(0,1500)});
+        var multi2=extractAllRacesFromJSON(state);
+        if(multi2.length){addDebugInfo(debugInfo);return multi2}
         var ex = extractStateJSON(state);
-        if(ex && ex.horses.length){addDebugInfo(debugInfo);return ex}
+        if(ex && ex.horses.length){addDebugInfo(debugInfo);allResults.push(ex)}
       }catch(e){}
     }
 
     /* Inline JSON objects with runner-like data */
-    if(/["'](?:runners?|horses?|cards?|entries)["']\s*:/.test(txt)){
+    if(/["'](?:runners?|horses?|cards?|entries|races?)["']\s*:/.test(txt)){
       try{
         var jsonStart = txt.indexOf('{');
         var obj = JSON.parse(txt.slice(jsonStart));
         debugInfo.push({source:'inline JSON',snippet:JSON.stringify(obj).substring(0,1500)});
-        var ex2 = extractStateJSON(obj);
-        if(ex2 && ex2.horses.length){addDebugInfo(debugInfo);return ex2}
+        var multi3=extractAllRacesFromJSON(obj);
+        if(multi3.length){addDebugInfo(debugInfo);return multi3}
       }catch(e){}
     }
-
-    /* Capture any large script that might contain data */
-    if(txt.length>500&&txt.indexOf('{')>=0){
-      /* Try to find any JSON object in the script */
-      var jsonMatches=txt.match(/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g);
-      if(jsonMatches){
-        for(var jm=0;jm<Math.min(jsonMatches.length,5);jm++){
-          if(jsonMatches[jm].length>200){
-            try{
-              var pj=JSON.parse(jsonMatches[jm]);
-              var ex3=extractStateJSON(pj);
-              if(ex3&&ex3.horses.length){addDebugInfo(debugInfo);return ex3}
-            }catch(e){}
-          }
-        }
-      }
-    }
   }
+
+  if(allResults.length){addDebugInfo(debugInfo);return allResults}
 
   /* ── Parse visible page text ── */
   var bodyText = doc.body ? doc.body.textContent : '';
   debugInfo.push({source:'text fallback',snippet:bodyText.substring(0,1500)});
   addDebugInfo(debugInfo);
-  return parseRacecardText(bodyText);
+  var textResult=parseRacecardText(bodyText);
+  return textResult.horses.length?[textResult]:[];
 }
 
-/* Extract data from Next.js page props — walk the tree looking for runner arrays */
+/* Extract ALL races from Next.js page props */
 function extractNextData(obj){
   var found = findRunnerArray(obj);
   if(!found) return null;
   return extractRunnerArray(found.runners, found.raceInfo||{});
+}
+
+/* Extract ALL races from any JSON — returns array of {horses,raceInfo} */
+function extractAllRacesFromJSON(obj){
+  var allFound = findAllRunnerArrays(obj);
+  if(!allFound.length) return [];
+  var results=[];
+  var seenKeys={};
+  for(var i=0;i<allFound.length;i++){
+    var extracted=extractRunnerArray(allFound[i].runners, allFound[i].raceInfo||{});
+    if(extracted&&extracted.horses.length){
+      /* Deduplicate by horse name set */
+      var hKey=extracted.horses.map(function(h){return(h.name||'').toLowerCase()}).sort().join('|');
+      if(!seenKeys[hKey]){
+        seenKeys[hKey]=true;
+        results.push(extracted);
+      }
+    }
+  }
+  return results;
 }
 
 function extractStateJSON(obj){
@@ -506,58 +526,70 @@ function extractStateJSON(obj){
   return extractRunnerArray(found.runners, found.raceInfo||{});
 }
 
-/* Recursively search an object for arrays that look like horse/runner data */
-function findRunnerArray(obj, depth, parentRaceInfo){
-  if(!obj||typeof obj!=='object') return null;
+/* Find ALL runner arrays in a JSON tree (not just the first) */
+function findAllRunnerArrays(obj, depth, parentRaceInfo, results){
+  if(!results)results=[];
+  if(!obj||typeof obj!=='object') return results;
   if(depth===undefined) depth=0;
-  if(depth>12) return null;
+  if(depth>12) return results;
 
-  /* Gather race-level info from this node (course, time, etc.) */
   var ri = gatherRaceInfo(obj);
+  var merged=mergeRaceInfo(parentRaceInfo,ri);
 
-  /* Check many possible array key names */
+  /* Check for runner arrays at this level */
   var arrKeys = ['runners','horses','Runners','Horses','cards','entries','runners_list',
     'runnersData','horseList','raceRunners','participants','starters','selections'];
-  var arr = null;
+  var foundHere=false;
   for(var k=0;k<arrKeys.length;k++){
-    if(Array.isArray(obj[arrKeys[k]])&&obj[arrKeys[k]].length>=2){arr=obj[arrKeys[k]];break}
+    var arr=obj[arrKeys[k]];
+    if(Array.isArray(arr)&&arr.length>=2&&arr[0]&&typeof arr[0]==='object'){
+      if(looksLikeRunners(arr)){
+        results.push({runners:arr,raceInfo:merged});
+        foundHere=true;
+        break;
+      }
+    }
   }
 
-  /* Also check any array property with 2+ objects that look like runner data */
-  if(!arr){
+  /* Also check unnamed arrays */
+  if(!foundHere){
     var okeys=Object.keys(obj);
     for(var k=0;k<okeys.length;k++){
       var v=obj[okeys[k]];
       if(Array.isArray(v)&&v.length>=2&&v[0]&&typeof v[0]==='object'){
-        if(looksLikeRunners(v)){arr=v;break}
+        if(looksLikeRunners(v)){
+          results.push({runners:v,raceInfo:merged});
+          foundHere=true;
+          break;
+        }
       }
     }
   }
 
-  if(arr){
-    var mergedRI=mergeRaceInfo(parentRaceInfo,ri);
-    return{runners:arr,raceInfo:mergedRI};
-  }
+  /* If we found runners here, don't recurse deeper (they'd be the same) */
+  if(foundHere) return results;
 
-  /* Walk children, passing race info down */
-  var merged=mergeRaceInfo(parentRaceInfo,ri);
+  /* Walk children to find more race data */
   var keys = Object.keys(obj);
   for(var i=0;i<keys.length;i++){
     var val = obj[keys[i]];
     if(Array.isArray(val)){
-      /* If it's an array of objects, each might contain runners */
       for(var j=0;j<val.length;j++){
         if(val[j]&&typeof val[j]==='object'){
-          var r=findRunnerArray(val[j],depth+1,merged);
-          if(r) return r;
+          findAllRunnerArrays(val[j],depth+1,merged,results);
         }
       }
     } else if(val&&typeof val==='object'){
-      var r2=findRunnerArray(val,depth+1,merged);
-      if(r2) return r2;
+      findAllRunnerArrays(val,depth+1,merged,results);
     }
   }
-  return null;
+  return results;
+}
+
+/* Find first runner array (for single-race pages) */
+function findRunnerArray(obj, depth, parentRaceInfo){
+  var all=findAllRunnerArrays(obj,depth,parentRaceInfo);
+  return all.length?all[0]:null;
 }
 
 /* Heuristic: does an array look like it contains runner/horse objects? */
@@ -651,36 +683,8 @@ function extractRunnerArray(arr, raceInfo){
       name=r.runner.name||r.runner.horseName||'';
     }
 
-    /* ── Form ── */
-    var form = deepFind(r,['form','formFigures','recentForm','form_figures',
-      'recent_form','formFig','formGuide','last_form','raceForm','formString',
-      'formWatch','formData','pastResults','figures','formatedForm','formattedForm',
-      'pastForm','resultForm','lifetimeForm']) || '';
-    if(typeof form==='object'&&form){
-      form=form.figures||form.form||form.recent||form.flat||form.allWeather||
-        form.turf||form.last6||form.last5||form.summary||'';
-    }
-    /* If form is an array, join positions */
-    if(Array.isArray(form)){
-      form=form.map(function(f){
-        if(typeof f==='object'&&f){return f.position||f.pos||f.finishPosition||f.placing||''}
-        return f;
-      }).join('');
-    }
-    /* Deep search: look in ALL string values for form-like patterns */
-    if(!form){
-      var allStrings=getAllStrings(r);
-      for(var fi=0;fi<allStrings.length;fi++){
-        var sv=allStrings[fi];
-        if(sv.length>=2&&sv.length<=15&&/^[0-9FPURSCBOfpurscbo\/-]+$/.test(sv)&&/\d/.test(sv)){
-          form=sv;break;
-        }
-      }
-    }
-
-    /* ── Odds ── */
+    /* ── Odds (extract FIRST so we can exclude from form) ── */
     var oddsStr='', oddsDec=null;
-    /* Direct numeric/string odds fields */
     var oddsFields=['odds','bestOdds','best_odds','industryBestOdds','forecastPrice',
       'forecast_price','spOdds','sp','startingPrice','starting_price','price',
       'bestOffer','best_offer','oddsDecimal','odds_decimal','decimalOdds',
@@ -698,14 +702,46 @@ function extractRunnerArray(arr, raceInfo){
         if(!isNaN(pd)&&pd>1&&pd<200){oddsDec=pd;oddsStr=decToFrac(pd);break}
       }
       if(typeof ov==='object'&&ov){
-        /* Nested odds object */
         var nd=ov.decimal||ov.dec||ov.decimalOdds||ov.price||ov.decimalPrice;
         var nf=ov.fractional||ov.frac||ov.fractionalOdds||ov.display||ov.fractionalPrice;
         if(nd&&typeof nd==='number'){oddsDec=nd;oddsStr=nf||decToFrac(nd);break}
         if(nf&&typeof nf==='string'){oddsDec=fracToDec(nf);oddsStr=nf;break}
-        /* Numerator/denominator */
         if(ov.numerator!==undefined&&ov.denominator!==undefined&&ov.denominator>0){
           oddsDec=(ov.numerator/ov.denominator)+1;oddsStr=ov.numerator+'/'+ov.denominator;break;
+        }
+      }
+    }
+
+    /* ── Form (after odds, so we can exclude odds values) ── */
+    var form = deepFind(r,['form','formFigures','recentForm','form_figures',
+      'recent_form','formFig','formGuide','last_form','raceForm','formString',
+      'formWatch','formData','pastResults','figures','formatedForm','formattedForm',
+      'pastForm','resultForm','lifetimeForm']) || '';
+    if(typeof form==='object'&&form){
+      form=form.figures||form.form||form.recent||form.flat||form.allWeather||
+        form.turf||form.last6||form.last5||form.summary||'';
+    }
+    /* If form is an array, join positions */
+    if(Array.isArray(form)){
+      form=form.map(function(f){
+        if(typeof f==='object'&&f){return f.position||f.pos||f.finishPosition||f.placing||''}
+        return f;
+      }).join('');
+    }
+    /* Deep search: look for form-like string patterns */
+    if(!form){
+      var allStrings=getAllStrings(r);
+      for(var fi=0;fi<allStrings.length;fi++){
+        var sv=allStrings[fi];
+        /* Skip if it matches the odds we already extracted */
+        if(sv===oddsStr)continue;
+        /* Skip fractional odds patterns (N/N) */
+        if(/^\d{1,3}\/\d{1,3}$/.test(sv))continue;
+        /* Skip pure numbers under 3 chars (could be draw, age, weight) */
+        if(/^\d{1,2}$/.test(sv))continue;
+        /* Must look like form: 3+ chars, form characters only */
+        if(sv.length>=3&&sv.length<=15&&/^[0-9FPURSCBOfpurscbo\/-]+$/.test(sv)&&/\d/.test(sv)){
+          form=sv;break;
         }
       }
     }
@@ -817,6 +853,22 @@ function fracToDec(s){
   var m=s.match(/(\d+)\/(\d+)/);
   if(!m)return null;
   return(+m[1]/ +m[2])+1;
+}
+
+/* Filter race results to UK flat only */
+function filterUKFlat(results){
+  return results.filter(function(r){
+    var courseLower=(r.raceInfo.course||'').toLowerCase();
+    var descLower=(r.raceInfo.desc||'').toLowerCase();
+    var combined=courseLower+' '+descLower;
+    /* Check if it's a UK course */
+    var isUK=UK_COURSES.some(function(c){return courseLower.indexOf(c)>=0});
+    /* If no course name, keep it (we can't filter what we don't know) */
+    if(!courseLower)isUK=true;
+    /* Check if it's jump racing */
+    var isJump=JUMP_RE.test(combined)||JUMP_COURSES.some(function(c){return courseLower.indexOf(c)>=0});
+    return isUK&&!isJump;
+  });
 }
 
 /* Extract course name from a Racing Post URL slug */
@@ -946,18 +998,34 @@ async function loadToday(){
   allRunnerData=[];
 
   try{
+    /* ── Strategy 1: try to get ALL races directly from the racecards page ── */
     var html = await proxyFetch(RP_BASE+'/racecards/');
+    showLoad('Parsing racecards data…');
+
+    var directResults = parseRacePageMulti(html);
+    /* Filter for UK flat only */
+    directResults = filterUKFlat(directResults);
+    if(directResults.length>=3){
+      /* Got multiple races directly — no need to fetch individual pages */
+      hideLoad();
+      renderHorses(directResults);
+      return;
+    }
+
+    /* ── Strategy 2: find race URLs and fetch each one ── */
+    showLoad('Finding individual race links…');
     var raceLinks = parseMeetingsPage(html);
 
-    if(!raceLinks.length){
+    if(!raceLinks.length&&!directResults.length){
       hideLoad();
-      /* Try parsing the page itself for embedded data */
-      var directParse = parseRacePage(html);
-      if(directParse&&directParse.horses.length){
-        renderHorses([directParse]);
-        return;
-      }
-      msg('No race links found on the Racing Post page. The site may have changed its layout, or there\'s no UK racing today. Try pasting racecard text instead.','warn');
+      msg('No race links found on Racing Post. The site may have changed its layout, or there\'s no UK racing today. Try pasting racecard text instead.','warn');
+      return;
+    }
+
+    /* If we got some direct results but not enough links, show what we have */
+    if(!raceLinks.length&&directResults.length){
+      hideLoad();
+      renderHorses(directResults);
       return;
     }
 
@@ -975,20 +1043,33 @@ async function loadToday(){
 
     if(!ukFlat.length){
       hideLoad();
+      if(directResults.length){
+        renderHorses(directResults);
+        return;
+      }
       msg('Found '+raceLinks.length+' race links but no UK flat races. Jump-only cards may be running today. Try pasting a specific racecard.','info');
       return;
     }
 
     showLoad('Loading '+ukFlat.length+' UK flat races…');
 
-    var results=[];
+    var results=directResults.slice(); /* start with any direct results */
     var seenHorseKeys={};
+    /* Mark existing results as seen */
+    results.forEach(function(r){
+      var hKey=r.horses.map(function(h){return(h.name||'').toLowerCase()}).sort().join('|');
+      if(hKey)seenHorseKeys[hKey]=true;
+    });
+
     for(var i=0;i<ukFlat.length;i++){
       showLoad('Loading race '+(i+1)+' of '+ukFlat.length+'…');
       try{
         var raceHtml = await proxyFetch(RP_BASE+ukFlat[i].href);
-        var parsed = parseRacePage(raceHtml);
-        if(parsed&&parsed.horses.length){
+        var allParsed = parseRacePageMulti(raceHtml);
+        if(!allParsed.length) continue;
+        for(var ap=0;ap<allParsed.length;ap++){
+          var parsed=allParsed[ap];
+          if(!parsed||!parsed.horses.length)continue;
           /* Extract course name from URL slug if not in parsed data */
           if(!parsed.raceInfo.course||parsed.raceInfo.course===''){
             parsed.raceInfo.course=courseFromUrl(ukFlat[i].href);
@@ -1007,6 +1088,9 @@ async function loadToday(){
         }
       }catch(e){/* skip failed races */}
     }
+
+    /* Filter for UK flat */
+    results=filterUKFlat(results);
 
     if(!results.length){
       hideLoad();
