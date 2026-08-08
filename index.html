@@ -1,0 +1,955 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LayFinder — UK Flat Racing</title>
+<style>
+  :root {
+    --ground: #0C1610;
+    --surface: #132019;
+    --raised: #1A2D24;
+    --border: #24382E;
+    --border-subtle: #1C3026;
+    --lay: #E05A72;
+    --lay-soft: rgba(224, 90, 114, 0.12);
+    --lay-border: rgba(224, 90, 114, 0.28);
+    --text: #D4DDD7;
+    --text-strong: #EDF2EE;
+    --muted: #6B8577;
+    --dim: #3E5A4C;
+    --good: #4CA870;
+    --warn: #D4A534;
+    --mono: 'SF Mono', 'Cascadia Mono', 'Fira Code', Consolas, monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --ground: #F4F0E8; --surface: #FFFFFF; --raised: #EDE9E0;
+      --border: #D6D0C5; --border-subtle: #E4DFD5;
+      --lay: #C94560; --lay-soft: rgba(201,69,96,0.07); --lay-border: rgba(201,69,96,0.22);
+      --text: #2A312C; --text-strong: #111; --muted: #7C7A70; --dim: #B5B0A5;
+      --good: #2E8B50; --warn: #B8901C;
+    }
+  }
+  :root[data-theme="light"] {
+    --ground: #F4F0E8; --surface: #FFFFFF; --raised: #EDE9E0;
+    --border: #D6D0C5; --border-subtle: #E4DFD5;
+    --lay: #C94560; --lay-soft: rgba(201,69,96,0.07); --lay-border: rgba(201,69,96,0.22);
+    --text: #2A312C; --text-strong: #111; --muted: #7C7A70; --dim: #B5B0A5;
+    --good: #2E8B50; --warn: #B8901C;
+  }
+  :root[data-theme="dark"] {
+    --ground: #0C1610; --surface: #132019; --raised: #1A2D24;
+    --border: #24382E; --border-subtle: #1C3026;
+    --lay: #E05A72; --lay-soft: rgba(224,90,114,0.12); --lay-border: rgba(224,90,114,0.28);
+    --text: #D4DDD7; --text-strong: #EDF2EE; --muted: #6B8577; --dim: #3E5A4C;
+    --good: #4CA870; --warn: #D4A534;
+  }
+
+  *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--ground);color:var(--text);line-height:1.55;min-height:100vh;-webkit-font-smoothing:antialiased}
+
+  .topbar{background:var(--surface);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}
+  .brand{font-family:Georgia,'Times New Roman',serif;font-size:22px;font-style:italic;font-weight:400;color:var(--text-strong);letter-spacing:-0.01em}
+  .brand em{font-style:italic;color:var(--lay)}
+  .topbar-meta{font-size:12px;color:var(--muted);letter-spacing:0.03em}
+
+  .wrap{max-width:1080px;margin:0 auto;padding:20px 24px 60px}
+
+  /* ── Fetch section ─────────────────────────── */
+  .fetch-section{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:20px;margin-bottom:20px}
+  .fetch-heading{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);margin-bottom:12px}
+  .fetch-row{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:12px}
+  .fetch-primary{display:flex;gap:10px;margin-bottom:16px}
+  .field{display:flex;flex-direction:column;gap:3px;flex:1;min-width:0}
+  .field label{font-size:11px;font-weight:500;color:var(--dim);text-transform:uppercase;letter-spacing:0.06em}
+  input,select{background:var(--ground);border:1px solid var(--border);color:var(--text);padding:7px 10px;border-radius:4px;font-size:13px;font-family:inherit;outline:none;transition:border-color 0.15s;width:100%}
+  input:focus{border-color:var(--lay)}
+
+  .btn{display:inline-flex;align-items:center;gap:6px;padding:8px 18px;border:none;border-radius:4px;font-size:13px;font-weight:600;font-family:inherit;cursor:pointer;transition:opacity 0.15s;white-space:nowrap}
+  .btn:hover{opacity:0.85}
+  .btn:disabled{opacity:0.4;cursor:not-allowed}
+  .btn-primary{background:var(--lay);color:#fff}
+  .btn-ghost{background:var(--raised);color:var(--text);border:1px solid var(--border)}
+  .btn-lg{padding:10px 24px;font-size:14px}
+
+  .divider{display:flex;align-items:center;gap:12px;margin:14px 0;color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:0.1em}
+  .divider::before,.divider::after{content:'';flex:1;height:1px;background:var(--border)}
+
+  .paste-box{width:100%;min-height:100px;max-height:260px;background:var(--ground);border:2px dashed var(--border);color:var(--text);padding:12px;border-radius:5px;font-size:12px;font-family:var(--mono);line-height:1.5;resize:vertical;outline:none;transition:border-color 0.2s}
+  .paste-box:focus{border-color:var(--lay);border-style:solid}
+  .paste-box::placeholder{color:var(--dim);font-family:inherit}
+  .paste-actions{display:flex;gap:10px;margin-top:10px;align-items:center;flex-wrap:wrap}
+  .parse-status{font-size:12px;color:var(--muted);margin-left:auto}
+
+  .fetch-note{font-size:12px;color:var(--dim);line-height:1.5;margin-top:10px}
+  .fetch-note a{color:var(--muted);text-decoration:underline;text-underline-offset:2px}
+
+  /* ── Method cards ──────────────────────────── */
+  .method{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--border);border:1px solid var(--border);border-radius:6px;overflow:hidden;margin-bottom:24px}
+  .method-cell{background:var(--surface);padding:14px 16px}
+  .method-cell h4{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--lay);margin-bottom:6px}
+  .method-cell p{font-size:12px;color:var(--muted);line-height:1.55}
+
+  /* ── Messages ──────────────────────────────── */
+  .msg{padding:10px 14px;border-radius:5px;margin-bottom:16px;font-size:13px;display:none;line-height:1.5}
+  .msg.show{display:block}
+  .msg-info{background:rgba(75,168,112,0.08);border:1px solid rgba(75,168,112,0.2);color:var(--good)}
+  .msg-error{background:var(--lay-soft);border:1px solid var(--lay-border);color:var(--lay)}
+  .msg-ok{background:rgba(75,168,112,0.08);border:1px solid rgba(75,168,112,0.2);color:var(--good)}
+  .msg-warn{background:rgba(212,165,52,0.08);border:1px solid rgba(212,165,52,0.2);color:var(--warn)}
+
+  .demo-flag{background:var(--lay-soft);border:1px solid var(--lay-border);border-radius:5px;padding:10px 14px;margin-bottom:16px;font-size:12px;color:var(--lay);font-weight:500}
+
+  /* ── Loading ───────────────────────────────── */
+  .loading{text-align:center;padding:40px 20px;color:var(--muted);font-size:13px}
+  .spinner{width:24px;height:24px;border:2px solid var(--border);border-top-color:var(--lay);border-radius:50%;animation:spin 0.7s linear infinite;margin:0 auto 12px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  /* ── Summary ───────────────────────────────── */
+  .summary{border:1px solid var(--lay-border);border-radius:6px;overflow:hidden;margin-bottom:24px}
+  .summary-head{background:var(--lay-soft);padding:14px 18px;display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px;border-bottom:1px solid var(--lay-border)}
+  .summary-head h2{font-family:Georgia,'Times New Roman',serif;font-style:italic;font-size:17px;font-weight:400;color:var(--text-strong)}
+  .summary-head .date-label{font-size:12px;color:var(--muted);font-family:var(--mono)}
+  .summary-body{background:var(--surface)}
+  .summary-empty{padding:20px 18px;font-size:13px;color:var(--muted)}
+
+  /* ── Tables ────────────────────────────────── */
+  .tbl-wrap{overflow-x:auto}
+  table{width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums}
+  th{text-align:left;padding:8px 14px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--dim);border-bottom:1px solid var(--border);white-space:nowrap}
+  td{padding:9px 14px;border-bottom:1px solid var(--border-subtle);vertical-align:middle}
+  tbody tr:last-child td{border-bottom:none}
+
+  /* ── Race cards ────────────────────────────── */
+  .race{background:var(--surface);border:1px solid var(--border);border-radius:6px;margin-bottom:14px;overflow:hidden}
+  .race-head{padding:12px 16px;background:var(--raised);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;cursor:pointer;user-select:none}
+  .race-head:hover{background:var(--border)}
+  .race-title{font-size:14px;font-weight:600;color:var(--text-strong)}
+  .race-title .time{font-family:var(--mono);font-size:13px;color:var(--lay);margin-right:6px}
+  .race-tags{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+  .tag{display:inline-block;background:var(--ground);border:1px solid var(--border);border-radius:3px;padding:1px 7px;font-size:11px;color:var(--muted);white-space:nowrap}
+  .race-body{display:none}
+  .race.open .race-body{display:block}
+  .race-empty{padding:16px;text-align:center;font-size:12px;color:var(--dim)}
+  .chevron{display:inline-block;width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:5px solid var(--muted);transition:transform 0.2s}
+  .race.open .chevron{transform:rotate(180deg)}
+
+  /* ── Horse data ────────────────────────────── */
+  .horse-name{font-weight:600;color:var(--text-strong);font-size:13px}
+  .form{font-family:var(--mono);font-size:13px;letter-spacing:1.5px}
+  .f-g{color:var(--good)}.f-m{color:var(--warn)}.f-b{color:var(--lay)}.f-s{color:var(--dim)}
+  .odds{font-family:var(--mono);font-weight:600;font-size:13px}
+  .odds .dec{font-weight:400;font-size:11px;color:var(--dim);margin-left:4px}
+
+  .score-cell{display:flex;align-items:center;gap:8px;min-width:90px}
+  .score-num{font-family:var(--mono);font-weight:700;font-size:15px;min-width:24px;text-align:right}
+  .score-track{flex:1;height:4px;background:var(--border);border-radius:2px;min-width:40px}
+  .score-fill{height:100%;border-radius:2px;background:var(--lay);transition:width 0.3s ease}
+
+  .badge{display:inline-block;padding:2px 7px;border-radius:3px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;white-space:nowrap}
+  .badge-strong{background:var(--lay-soft);color:var(--lay);border:1px solid var(--lay-border)}
+  .badge-moderate{background:rgba(212,165,52,0.1);color:var(--warn);border:1px solid rgba(212,165,52,0.2)}
+  .badge-weak{background:rgba(107,133,119,0.08);color:var(--dim);border:1px solid var(--border)}
+
+  .results-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:14px;flex-wrap:wrap;gap:6px}
+  .results-head h2{font-size:15px;font-weight:600;color:var(--text-strong)}
+  .results-head .meta{font-size:12px;color:var(--muted)}
+
+  .has-tip{position:relative;cursor:help}
+  .has-tip::after{content:attr(data-tip);position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%);background:var(--raised);color:var(--text);padding:5px 9px;border-radius:4px;font-size:11px;font-family:var(--mono);white-space:nowrap;z-index:10;pointer-events:none;opacity:0;transition:opacity 0.15s;border:1px solid var(--border)}
+  .has-tip:hover::after{opacity:1}
+
+  .inline-input{background:var(--ground);border:1px solid var(--border);color:var(--text);padding:4px 6px;border-radius:3px;font-size:12px;font-family:var(--mono);width:80px;outline:none;transition:border-color 0.15s}
+  .inline-input:focus{border-color:var(--lay)}
+  .inline-input::placeholder{color:var(--dim);font-size:11px}
+  .inline-input.filled{border-color:var(--good)}
+  .form-hint{font-size:10px;color:var(--dim);margin-top:2px}
+
+  .page-foot{text-align:center;padding:24px;font-size:11px;color:var(--dim);border-top:1px solid var(--border-subtle);margin-top:32px;letter-spacing:0.02em}
+  .hidden{display:none !important}
+
+  @media(max-width:720px){
+    .wrap{padding:14px}
+    .method{grid-template-columns:1fr}
+    .fetch-primary{flex-direction:column}
+    .fetch-row{flex-direction:column}
+    .race-head{flex-direction:column;align-items:flex-start}
+    th,td{padding:7px 10px}
+    .topbar{padding:12px 16px}
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="brand"><em>Lay</em>Finder</div>
+  <div class="topbar-meta">UK Flat &middot; Odds &le; 8/1</div>
+</div>
+
+<div class="wrap">
+
+  <div class="fetch-section">
+    <div class="fetch-heading">Load from Racing Post</div>
+
+    <div class="fetch-primary">
+      <button class="btn btn-primary btn-lg" id="todayBtn" onclick="loadToday()">Load Today&rsquo;s UK Flat Races</button>
+      <button class="btn btn-ghost" onclick="loadDemo()">Demo</button>
+    </div>
+
+    <div class="fetch-row">
+      <div class="field">
+        <label>Or enter a Racing Post race URL</label>
+        <input type="text" id="raceUrl" placeholder="https://www.racingpost.com/racecards/…">
+      </div>
+      <button class="btn btn-ghost" onclick="loadUrl()" style="flex:none">Load Race</button>
+    </div>
+
+    <div class="divider">or paste racecard text</div>
+
+    <textarea class="paste-box" id="pasteBox" placeholder="Select runners on any Racing Post racecard, copy (Ctrl+C), and paste here…"></textarea>
+    <div class="paste-actions">
+      <button class="btn btn-ghost" onclick="parseAndRender()">Parse Pasted Text</button>
+      <button class="btn btn-ghost" onclick="clearAll()">Clear</button>
+      <span class="parse-status" id="parseStatus"></span>
+    </div>
+
+    <div class="fetch-note">
+      Fetches racecard data directly from
+      <a href="https://www.racingpost.com/racecards" target="_blank" rel="noopener">racingpost.com</a>
+      via a server-side proxy (requires Vercel hosting).
+      Paste fallback works everywhere.
+    </div>
+  </div>
+
+  <div class="msg" id="msg"></div>
+
+  <div id="loadingArea" class="hidden">
+    <div class="loading"><div class="spinner"></div><span id="loadingText">Loading…</span></div>
+  </div>
+
+  <div class="method">
+    <div class="method-cell">
+      <h4>Trainer (0–40)</h4>
+      <p>Auto-filled when available, or type manually. &lt;5% scores 40, &gt;20% scores 0. Unknown defaults to 25.</p>
+    </div>
+    <div class="method-cell">
+      <h4>Form (0–40)</h4>
+      <p>Parsed from racecard (e.g. 060800). 6th–9th: 5 pts. 10th+/fell/PU: 7–8 pts. Missing scores 30.</p>
+    </div>
+    <div class="method-cell">
+      <h4>Odds (0–20)</h4>
+      <p>From Racing Post best odds. Shorter odds + bad fundamentals = bigger market error. Evens = 20, 8/1 = 0.</p>
+    </div>
+  </div>
+
+  <div id="resultsArea" class="hidden">
+    <div id="summaryArea"></div>
+    <div id="racesArea"></div>
+  </div>
+
+</div>
+
+<div class="page-foot">LayFinder &mdash; Flat racing lay analysis &middot; Always gamble responsibly</div>
+
+<script>
+/* ══════════════════════════════════════════════
+   CONSTANTS
+   ══════════════════════════════════════════════ */
+var PROXY = '/api/racing-proxy?url=';
+var RP_BASE = 'https://www.racingpost.com';
+var UK_COURSES = ['ascot','ayr','bath','beverley','brighton','carlisle','catterick','chelmsford','chelmsford city','chester','chepstow','doncaster','epsom','epsom downs','ffos las','goodwood','hamilton','haydock','haydock park','kempton','kempton park','leicester','lingfield','lingfield park','musselburgh','newbury','newcastle','newmarket','nottingham','pontefract','redcar','ripon','salisbury','sandown','sandown park','southwell','thirsk','wetherby','windsor','wolverhampton','yarmouth','york'];
+var JUMP_COURSES = ['aintree','bangor','bangor-on-dee','cartmel','cheltenham','exeter','fakenham','fontwell','fontwell park','hereford','hexham','huntingdon','kelso','ludlow','market rasen','newton abbot','perth','plumpton','sedgefield','stratford','taunton','towcester','uttoxeter','warwick','wincanton','worcester'];
+var ALL_COURSES = UK_COURSES.concat(JUMP_COURSES);
+var JUMP_RE = /chase|chs|hurdle|hdl|nh\s?flat|nhf|bumper|steeplechase|national hunt/i;
+var COUNTRY_RE = /\((IRE|GB|FR|USA|GER|ITY|SAF|AUS|NZ|CAN|UAE|JPN|SPA|BRZ|ARG)\)/gi;
+var allRunnerData = [];
+
+function esc(s){var d=document.createElement('div');d.textContent=s||'';return d.innerHTML}
+function msg(t,type){var e=document.getElementById('msg');e.textContent=t;e.className='msg show msg-'+type}
+function msgClear(){document.getElementById('msg').className='msg'}
+function showLoad(t){document.getElementById('loadingText').textContent=t;document.getElementById('loadingArea').classList.remove('hidden');document.getElementById('resultsArea').classList.add('hidden')}
+function hideLoad(){document.getElementById('loadingArea').classList.add('hidden')}
+
+/* ══════════════════════════════════════════════
+   SCORING ENGINE
+   ══════════════════════════════════════════════ */
+function parseFormChars(s){
+  if(!s||s.trim()==='-'||!s.trim())return[];
+  var out=[];
+  for(var i=0;i<s.length;i++){
+    var c=s[i].toUpperCase();
+    if(c==='/'||c==='-')out.push({c:c,t:'sep'});
+    else if('0123456789'.indexOf(c)>=0)out.push({c:c,p:c==='0'?10:+c});
+    else if('FPURSBC'.indexOf(c)>=0)out.push({c:c,p:99});
+  }
+  return out;
+}
+function scoreForm(s){
+  var runs=parseFormChars(s).filter(function(x){return x.t!=='sep'}).slice(0,6);
+  if(!runs.length)return 30;
+  var sc=0;
+  runs.forEach(function(r){
+    if(r.p<=3)sc+=0;else if(r.p<=5)sc+=2;else if(r.p<=9)sc+=5;else if(r.p===10)sc+=7;else sc+=8;
+  });
+  if(runs.length<3)sc+=10;
+  return Math.min(sc,40);
+}
+function renderFormHTML(s){
+  var ch=parseFormChars(s);
+  if(!ch.length)return'<span style="color:var(--dim)">—</span>';
+  return ch.map(function(c){
+    if(c.t==='sep')return'<span class="f-s">'+c.c+'</span>';
+    var cls=c.p<=3?'f-g':(c.p>=7||c.p===99?'f-b':'f-m');
+    return'<span class="'+cls+'">'+c.c+'</span>';
+  }).join('');
+}
+function scoreTrainerPct(pct){
+  if(pct===null||pct===undefined||pct==='')return 25;
+  var p=parseFloat(pct);if(isNaN(p))return 25;
+  return Math.max(0,Math.min(40,Math.round(40-p*2)));
+}
+function scoreOdds(d){
+  if(!d||d<=1)return 10;
+  return Math.max(0,Math.min(20,Math.round(20*(1-(d-1)/8))));
+}
+function layScore(formStr,trainerPct,odds){
+  var f=scoreForm(formStr),t=scoreTrainerPct(trainerPct),o=scoreOdds(odds);
+  return{total:f+t+o,f:f,t:t,o:o};
+}
+function layRating(total){
+  if(total>=65)return{label:'STRONG LAY',cls:'badge-strong'};
+  if(total>=45)return{label:'LAY',cls:'badge-moderate'};
+  return{label:'WATCH',cls:'badge-weak'};
+}
+function decToFrac(d){
+  if(!d||d<=1)return'EVS';
+  var n=d-1;
+  var tbl=[[1,5],[1,4],[1,3],[2,5],[1,2],[4,7],[8,13],[4,6],[8,11],[4,5],[5,6],[10,11],[1,1],[6,5],[5,4],[11,8],[6,4],[13,8],[7,4],[2,1],[9,4],[5,2],[11,4],[3,1],[7,2],[4,1],[9,2],[5,1],[6,1],[7,1],[8,1]];
+  var best=null,bd=99;
+  tbl.forEach(function(f){var diff=Math.abs(f[0]/f[1]-n);if(diff<bd){bd=diff;best=f}});
+  return best?best[0]+'/'+best[1]:d.toFixed(1);
+}
+
+/* ══════════════════════════════════════════════
+   FETCH & PARSE FROM RACING POST
+   ══════════════════════════════════════════════ */
+
+/* Fetch HTML via Vercel proxy */
+async function proxyFetch(rpUrl){
+  var r = await fetch(PROXY + encodeURIComponent(rpUrl));
+  if(!r.ok){
+    var body = await r.text().catch(function(){return r.statusText});
+    throw new Error('Proxy error '+r.status+': '+body);
+  }
+  return r.text();
+}
+
+/* Parse meetings page → array of race links */
+function parseMeetingsPage(html){
+  var doc = new DOMParser().parseFromString(html,'text/html');
+  var races = [];
+
+  /* Strategy 1: find links to individual races */
+  var links = doc.querySelectorAll('a[href*="/racecards/"]');
+  links.forEach(function(a){
+    var href = a.getAttribute('href')||'';
+    /* Individual race URLs typically match: /racecards/{courseId}/{slug}/{date}/{raceId} */
+    if(/\/racecards\/\d+\/[^/]+\/\d{4}-\d{2}-\d{2}\/\d+/.test(href)){
+      var text = (a.textContent||'').trim();
+      if(!races.some(function(r){return r.href===href})){
+        races.push({href:href,text:text});
+      }
+    }
+  });
+
+  /* Strategy 2: search plain text for URL patterns */
+  if(!races.length){
+    var urlRe = /\/racecards\/(\d+)\/([^/]+)\/(\d{4}-\d{2}-\d{2})\/(\d+)/g;
+    var m;
+    while((m=urlRe.exec(html))!==null){
+      var href=m[0];
+      if(!races.some(function(r){return r.href===href})){
+        races.push({href:href,text:m[2].replace(/-/g,' ')});
+      }
+    }
+  }
+
+  return races;
+}
+
+/* Parse a single race page → horse data */
+function parseRacePage(html){
+  var doc = new DOMParser().parseFromString(html,'text/html');
+  var horses = [];
+  var raceInfo = {course:'',time:'',desc:''};
+
+  /* ── Try embedded JSON first (Next.js __NEXT_DATA__ or similar) ── */
+  var scripts = doc.querySelectorAll('script');
+  for(var i=0;i<scripts.length;i++){
+    var txt = scripts[i].textContent||'';
+
+    /* __NEXT_DATA__ */
+    if(scripts[i].id==='__NEXT_DATA__'|| txt.indexOf('__NEXT_DATA__')>=0){
+      try{
+        var json = scripts[i].id==='__NEXT_DATA__'
+          ? JSON.parse(txt)
+          : JSON.parse(txt.match(/__NEXT_DATA__\s*=\s*(\{[\s\S]+?\})\s*;?\s*$/m)[1]);
+        var extracted = extractNextData(json);
+        if(extracted && extracted.horses.length) return extracted;
+      }catch(e){}
+    }
+
+    /* Generic window.__STATE__ patterns */
+    var stateRe = /window\[?['"_]?(__\w+__)['"_]?\]?\s*=\s*(\{[\s\S]+?\})\s*;?\s*$/gm;
+    var sm;
+    while((sm=stateRe.exec(txt))!==null){
+      try{
+        var state = JSON.parse(sm[2]);
+        var ex = extractStateJSON(state);
+        if(ex && ex.horses.length) return ex;
+      }catch(e){}
+    }
+
+    /* Inline JSON objects with runner-like data */
+    if(/["'](?:runners?|horses?)["']\s*:/.test(txt)){
+      try{
+        var jsonStart = txt.indexOf('{');
+        var obj = JSON.parse(txt.slice(jsonStart));
+        var ex2 = extractStateJSON(obj);
+        if(ex2 && ex2.horses.length) return ex2;
+      }catch(e){}
+    }
+  }
+
+  /* ── Parse visible page text ── */
+  var bodyText = doc.body ? doc.body.textContent : '';
+  return parseRacecardText(bodyText);
+}
+
+/* Extract data from Next.js page props — walk the tree looking for runner arrays */
+function extractNextData(obj){
+  var found = findRunnerArray(obj);
+  if(!found) return null;
+  return extractRunnerArray(found.runners, found.raceInfo||{});
+}
+
+function extractStateJSON(obj){
+  var found = findRunnerArray(obj);
+  if(!found) return null;
+  return extractRunnerArray(found.runners, found.raceInfo||{});
+}
+
+/* Recursively search an object for arrays that look like horse/runner data */
+function findRunnerArray(obj, depth){
+  if(!obj||typeof obj!=='object') return null;
+  if(depth===undefined) depth=0;
+  if(depth>8) return null;
+
+  /* Check if this object has a runners or horses array */
+  var arr = obj.runners||obj.horses||obj.Runners||obj.Horses;
+  if(Array.isArray(arr)&&arr.length>=2){
+    var first = arr[0];
+    if(first&&(first.horseName||first.horse||first.name||first.runner||first.silk||first.jockey||first.trainer)){
+      return {
+        runners:arr,
+        raceInfo:{
+          course:obj.raceCourse||obj.courseName||obj.course||obj.venue||obj.venueName||'',
+          time:obj.raceTime||obj.time||obj.offTime||'',
+          desc:obj.raceTitle||obj.raceName||obj.title||''
+        }
+      };
+    }
+  }
+
+  /* Walk children */
+  var keys = Object.keys(obj);
+  for(var i=0;i<keys.length;i++){
+    var val = obj[keys[i]];
+    if(Array.isArray(val)){
+      for(var j=0;j<val.length;j++){
+        var r=findRunnerArray(val[j],depth+1);
+        if(r) return r;
+      }
+    } else if(val&&typeof val==='object'){
+      var r2=findRunnerArray(val,depth+1);
+      if(r2) return r2;
+    }
+  }
+  return null;
+}
+
+/* Convert a runners array (from JSON) into our standard format */
+function extractRunnerArray(arr, raceInfo){
+  var horses = arr.map(function(r){
+    var name = r.horseName||r.horse||r.name||r.runnerName||'';
+    var form = r.form||r.formFigures||r.recentForm||'';
+
+    /* Odds */
+    var oddsStr='', oddsDec=null;
+    if(r.odds){
+      if(typeof r.odds==='string'){ oddsStr=r.odds; oddsDec=fracToDec(r.odds); }
+      else if(r.odds.fractional){ oddsStr=r.odds.fractional; oddsDec=r.odds.decimal||fracToDec(r.odds.fractional); }
+      else if(r.odds.decimal){ oddsDec=r.odds.decimal; oddsStr=decToFrac(r.odds.decimal); }
+    }
+    if(!oddsDec && r.decimalOdds) oddsDec=parseFloat(r.decimalOdds);
+    if(!oddsDec && r.fractionalOdds){ oddsStr=r.fractionalOdds; oddsDec=fracToDec(r.fractionalOdds); }
+    if(!oddsDec && r.bestOdds){
+      if(typeof r.bestOdds==='number'){ oddsDec=r.bestOdds; oddsStr=decToFrac(r.bestOdds); }
+      else if(r.bestOdds.decimal){ oddsDec=r.bestOdds.decimal; oddsStr=r.bestOdds.fractional||decToFrac(oddsDec); }
+    }
+    if(!oddsStr && oddsDec) oddsStr=decToFrac(oddsDec);
+
+    /* Trainer */
+    var trainer = r.trainerName||r.trainer||(r.trainerObj?r.trainerObj.name:'')||'';
+    var trainerPct = null;
+    if(r.trainerStrikeRate!==undefined) trainerPct=parseFloat(r.trainerStrikeRate);
+    else if(r.trainerPercent!==undefined) trainerPct=parseFloat(r.trainerPercent);
+    else if(r.trainerWinRate!==undefined) trainerPct=parseFloat(r.trainerWinRate);
+    else if(typeof trainer==='string'){
+      var pctM=trainer.match(/(\d{1,3})%/);
+      if(pctM) trainerPct=parseInt(pctM[1]);
+    }
+    if(r.trainerLast14&&r.trainerLast14.runs&&r.trainerLast14.wins){
+      trainerPct=Math.round((r.trainerLast14.wins/r.trainerLast14.runs)*100);
+    }
+
+    return{name:name,form:form,odds:oddsStr,oddsDecimal:oddsDec,trainer:trainer,trainerPct:trainerPct};
+  });
+
+  return{horses:horses,raceInfo:raceInfo};
+}
+
+function fracToDec(s){
+  if(!s)return null;
+  if(/^evs?$/i.test(s.trim()))return 2.0;
+  var m=s.match(/(\d+)\/(\d+)/);
+  if(!m)return null;
+  return(+m[1]/ +m[2])+1;
+}
+
+/* ══════════════════════════════════════════════
+   TEXT PARSER (paste fallback)
+   ══════════════════════════════════════════════ */
+function isFormStr(s){
+  s=s.trim();if(s.length<2||s.length>15)return false;
+  var cleaned=s.replace(/[\/-]/g,'');
+  if(!/^[0-9FPURSCBOfpurscbo]+$/.test(cleaned))return false;
+  if(cleaned.length<2)return false;
+  if(/^\d{1,2}-\d{1,2}$/.test(s)){var p=s.split('-');if(+p[0]>=7&&+p[0]<=12&&+p[1]<=13)return false}
+  return true;
+}
+
+function parseRacecardText(text){
+  var lines=text.split(/\n/).map(function(l){return l.trim()}).filter(function(l){return l.length>1});
+  lines=lines.filter(function(l){
+    if(/^(Menu|Home|Login|Register|Sign|Search|Filter|Cookie|Accept|Bet Now|Add to|My Bets|Cash Out|Streaming)$/i.test(l))return false;
+    if(/^https?:\/\//i.test(l))return false;
+    return true;
+  });
+  if(lines.length<2)return{horses:[],raceInfo:{}};
+
+  var raceInfo=extractTextRaceInfo(lines);
+  var blocks=splitIntoBlocks(lines);
+  var horses=[];
+  for(var b=0;b<blocks.length;b++){
+    var h=parseTextBlock(blocks[b]);
+    if(h&&(h.name||h.form||h.odds))horses.push(h);
+  }
+  return{horses:horses,raceInfo:raceInfo};
+}
+
+function extractTextRaceInfo(lines){
+  var info={course:'',time:'',desc:''};
+  var searchText=lines.slice(0,15).join(' ').toLowerCase();
+  ALL_COURSES.forEach(function(c){if(searchText.indexOf(c)>=0&&!info.course)info.course=c.replace(/\b\w/g,function(x){return x.toUpperCase()})});
+  for(var i=0;i<Math.min(lines.length,15);i++){
+    var tm=lines[i].match(/\b(\d{1,2})[:.]\s?(\d{2})\b/);
+    if(tm&&!info.time){info.time=tm[1]+':'+tm[2];break}
+  }
+  for(var i=0;i<Math.min(lines.length,15);i++){
+    if(/\d+[mf]/.test(lines[i])||/handicap|hcap|stakes|maiden|novice|nursery|classified|claiming|seller|listed|group/i.test(lines[i])){info.desc=lines[i];break}
+  }
+  return info;
+}
+
+function splitIntoBlocks(lines){
+  var blocks=[],cur=[];
+  for(var i=0;i<lines.length;i++){
+    var cm=lines[i].match(/^(\d{1,2})(?:\s|\(|$)/);
+    if(cm&&+cm[1]>=1&&+cm[1]<=40){
+      if(cur.length>1)blocks.push(cur);cur=[lines[i]];
+    }else cur.push(lines[i]);
+  }
+  if(cur.length>1)blocks.push(cur);
+  if(blocks.length>=2)return blocks;
+  /* fallback: split by form patterns */
+  blocks=[];cur=[];var sawForm=false;
+  for(var i=0;i<lines.length;i++){
+    var wds=lines[i].split(/\s+/);
+    var hasF=wds.some(function(w){return isFormStr(w)});
+    if(hasF&&sawForm&&cur.length>0){blocks.push(cur);cur=[]}
+    cur.push(lines[i]);if(hasF)sawForm=true;
+  }
+  if(cur.length>0)blocks.push(cur);
+  return blocks.length>=2?blocks:[lines];
+}
+
+function parseTextBlock(lines){
+  var full=lines.join(' ');
+  var h={name:'',form:'',odds:'',oddsDecimal:null,trainerPct:null,trainer:''};
+  /* odds */
+  var oddsRe=/\b(\d{1,3})\/(\d{1,3})\b/g,m,oddsAll=[];
+  while((m=oddsRe.exec(full))!==null){var dec=(+m[1]/ +m[2])+1;if(dec>=1.1&&dec<=101)oddsAll.push({s:m[0],d:dec})}
+  if(oddsAll.length){var last=oddsAll[oddsAll.length-1];h.odds=last.s;h.oddsDecimal=last.d}
+  if(!h.odds&&/\bEvs?\b|\bEvens?\b/i.test(full)){h.odds='Evs';h.oddsDecimal=2.0}
+  /* trainer % */
+  var pctAll=full.match(/(\d{1,3})%/g);
+  if(pctAll)h.trainerPct=parseInt(pctAll[0]);
+  /* form */
+  var formCands=[];
+  lines.forEach(function(l){l.split(/\s+/).forEach(function(w){
+    if(isFormStr(w)&&w!==h.odds)formCands.push({s:w,len:w.replace(/[\/-]/g,'').length})
+  })});
+  if(formCands.length){formCands.sort(function(a,b){return b.len-a.len});h.form=formCands[0].s}
+  /* trainer */
+  var trM=full.match(/(?:T|Trainer)[:\s]+([A-Z][A-Za-z\s'.\-]+?)(?:\s+\d|\s*\(|$)/i);
+  if(trM)h.trainer=trM[1].trim();
+  /* name */
+  var skipWords=/^(Trainer|Jockey|Form|Age|Weight|Draw|Odds|Betting|Runner|Non|Reserve|Flat|Class|Distance|Going|Official|Rating|OR|RPR|TS|CD|BF|SP|NR)$/i;
+  for(var i=0;i<lines.length;i++){
+    var cl=lines[i].replace(/^\d{1,2}\s*(\(\d{1,2}\))?\s*/,'').replace(/\b[0-9FPURSCBOfpurscbo][0-9FPURSCBOfpurscbo\/-]{2,11}\b/g,'').replace(/\b\d{1,3}\/\d{1,3}\b/g,'').replace(/\b(?:[7-9]|1[0-2])-\d{1,2}\b/g,'').replace(/\b\d{1,3}%\b/g,'').replace(COUNTRY_RE,'').replace(/^(?:T|Trainer|J|Jockey)[:\s]+/i,'').trim();
+    if(cl.length<3)continue;
+    var nm=cl.match(/([A-Z][A-Za-z'']+(?:[\s\-][A-Z][A-Za-z'']+)*)/);
+    if(nm&&nm[0].length>=3){
+      var words=nm[0].split(/[\s\-]+/);
+      if(!words.every(function(w){return skipWords.test(w)})){h.name=nm[0];break}
+    }
+  }
+  if(!h.name&&lines.length>0){
+    var first=lines[0].replace(/^\d{1,2}\s*(\(\d+\))?\s*/,'').replace(COUNTRY_RE,'').replace(/\b\d{1,3}\/\d{1,3}\b/g,'').trim();
+    if(first.length>2)h.name=first.split(/\s{2,}/)[0].trim();
+  }
+  return h;
+}
+
+/* ══════════════════════════════════════════════
+   MAIN ACTIONS
+   ══════════════════════════════════════════════ */
+
+/* Load today's UK flat races from Racing Post */
+async function loadToday(){
+  msgClear();removeDemoFlag();
+  showLoad('Fetching today\'s racecards from Racing Post…');
+  document.getElementById('todayBtn').disabled=true;
+  allRunnerData=[];
+
+  try{
+    var html = await proxyFetch(RP_BASE+'/racecards/');
+    var raceLinks = parseMeetingsPage(html);
+
+    if(!raceLinks.length){
+      hideLoad();
+      /* Try parsing the page itself for embedded data */
+      var directParse = parseRacePage(html);
+      if(directParse&&directParse.horses.length){
+        renderHorses([directParse]);
+        return;
+      }
+      msg('No race links found on the Racing Post page. The site may have changed its layout, or there\'s no UK racing today. Try pasting racecard text instead.','warn');
+      return;
+    }
+
+    /* Filter for UK flat courses */
+    var ukFlat = raceLinks.filter(function(r){
+      var slug=(r.href+' '+r.text).toLowerCase();
+      var isUK=UK_COURSES.some(function(c){return slug.indexOf(c)>=0});
+      var isJump=JUMP_RE.test(slug)||JUMP_COURSES.some(function(c){return slug.indexOf(c)>=0});
+      return isUK&&!isJump;
+    });
+
+    /* De-duplicate by href */
+    var seen={};
+    ukFlat=ukFlat.filter(function(r){if(seen[r.href])return false;seen[r.href]=true;return true});
+
+    if(!ukFlat.length){
+      hideLoad();
+      msg('Found '+raceLinks.length+' race links but no UK flat races. Jump-only cards may be running today. Try pasting a specific racecard.','info');
+      return;
+    }
+
+    showLoad('Loading '+ukFlat.length+' UK flat races…');
+
+    var results=[];
+    for(var i=0;i<ukFlat.length;i++){
+      showLoad('Loading race '+(i+1)+' of '+ukFlat.length+'…');
+      try{
+        var raceHtml = await proxyFetch(RP_BASE+ukFlat[i].href);
+        var parsed = parseRacePage(raceHtml);
+        if(parsed&&parsed.horses.length) results.push(parsed);
+      }catch(e){/* skip failed races */}
+    }
+
+    if(!results.length){
+      hideLoad();
+      msg('Could not parse runner data from any race pages. Try pasting racecard text directly.','error');
+      return;
+    }
+
+    hideLoad();
+    renderHorses(results);
+
+  }catch(err){
+    hideLoad();
+    if(err.message.indexOf('Failed to fetch')>=0||err.message.indexOf('NetworkError')>=0){
+      msg('Cannot reach the proxy function. This feature requires Vercel hosting. Use the paste method instead, or deploy to Vercel.','error');
+    }else{
+      msg('Error: '+err.message+'. Try pasting racecard text instead.','error');
+    }
+  }finally{
+    document.getElementById('todayBtn').disabled=false;
+  }
+}
+
+/* Load a specific Racing Post race URL */
+async function loadUrl(){
+  var url=document.getElementById('raceUrl').value.trim();
+  if(!url){msg('Enter a Racing Post URL.','error');return}
+  if(!/racingpost\.com/.test(url)){msg('Please enter a racingpost.com URL.','error');return}
+  msgClear();removeDemoFlag();
+  showLoad('Fetching race from Racing Post…');
+  allRunnerData=[];
+
+  try{
+    var html = await proxyFetch(url);
+    var parsed = parseRacePage(html);
+    if(!parsed||!parsed.horses.length){
+      hideLoad();
+      msg('Could not extract runner data from that page. Try pasting the racecard text instead.','warn');
+      return;
+    }
+    hideLoad();
+    renderHorses([parsed]);
+  }catch(err){
+    hideLoad();
+    if(err.message.indexOf('Failed to fetch')>=0){
+      msg('Cannot reach the proxy. Deploy to Vercel for auto-fetch, or paste racecard text.','error');
+    }else{
+      msg('Error: '+err.message,'error');
+    }
+  }
+}
+
+/* ══════════════════════════════════════════════
+   RENDER RESULTS
+   ══════════════════════════════════════════════ */
+function renderHorses(results){
+  allRunnerData=[];
+  var racesHTML='';
+  var raceCount=0, totalQual=0;
+
+  results.forEach(function(result){
+    var ri=result.raceInfo||{};
+    var course=ri.course||'Unknown';
+    var time=ri.time||'';
+    var desc=ri.desc||'';
+
+    /* Only odds ≤ 8/1 */
+    var qualified=result.horses.filter(function(h){return h.oddsDecimal!==null&&h.oddsDecimal<=9.0});
+    qualified.sort(function(a,b){return(a.oddsDecimal||99)-(b.oddsDecimal||99)});
+
+    var tags='';
+    if(desc)tags+='<span class="tag">'+esc(desc.substring(0,60))+'</span>';
+    tags+='<span class="tag">'+result.horses.length+' runners</span>';
+    tags+='<span class="tag">'+qualified.length+' at &le; 8/1</span>';
+
+    if(!qualified.length){
+      racesHTML+='<div class="race"><div class="race-head" onclick="this.parentElement.classList.toggle(\'open\')"><div class="race-title"><span class="time">'+esc(time)+'</span>'+esc(course)+'</div><div class="race-tags">'+tags+'<span class="chevron"></span></div></div><div class="race-body"><div class="race-empty">No runners at odds &le; 8/1</div></div></div>';
+      raceCount++;return;
+    }
+
+    var rows=qualified.map(function(h,idx){
+      var rid='r'+raceCount+'_'+idx;
+      var sc=layScore(h.form,h.trainerPct,h.oddsDecimal);
+      var rating=layRating(sc.total);
+      var frac=h.odds||decToFrac(h.oddsDecimal);
+      var dec=h.oddsDecimal?h.oddsDecimal.toFixed(2):'';
+
+      allRunnerData.push({
+        id:rid,horse:h.name||'Horse '+(idx+1),odds:h.oddsDecimal,frac:frac,
+        form:h.form,tsr:h.trainerPct!==null?''+h.trainerPct:'',
+        course:course,time:time,desc:desc,lastScore:sc,lastRating:rating
+      });
+      totalQual++;
+
+      return'<tr id="row_'+rid+'">'
+        +'<td><div class="horse-name">'+esc(h.name||'Horse '+(idx+1))+'</div>'
+        +(h.trainer?'<div class="form-hint">'+esc(h.trainer)+'</div>':'')+'</td>'
+        +'<td><input class="inline-input'+(h.form?' filled':'')+'" id="form_'+rid+'" value="'+esc(h.form)+'" placeholder="e.g. 060800" oninput="recalc(\''+rid+'\')" maxlength="14"><div class="form-hint">Edit form</div></td>'
+        +'<td><span class="odds">'+esc(frac)+'<span class="dec">'+dec+'</span></span></td>'
+        +'<td><input class="inline-input'+(h.trainerPct!==null?' filled':'')+'" id="tsr_'+rid+'" value="'+(h.trainerPct!==null?h.trainerPct:'')+'" placeholder="e.g. 5" oninput="recalc(\''+rid+'\')" maxlength="4" style="width:52px"><div class="form-hint">Win %</div></td>'
+        +'<td><div class="score-cell has-tip" data-tip="T:'+sc.t+' F:'+sc.f+' O:'+sc.o+'" id="score_'+rid+'"><span class="score-num">'+sc.total+'</span><div class="score-track"><div class="score-fill" style="width:'+sc.total+'%"></div></div></div></td>'
+        +'<td><span class="badge '+rating.cls+'" id="badge_'+rid+'">'+rating.label+'</span></td>'
+        +'</tr>';
+    }).join('');
+
+    racesHTML+='<div class="race open"><div class="race-head" onclick="this.parentElement.classList.toggle(\'open\')"><div class="race-title"><span class="time">'+esc(time)+'</span>'+esc(course)+'</div><div class="race-tags">'+tags+'<span class="chevron"></span></div></div><div class="race-body"><div class="tbl-wrap"><table><thead><tr><th>Horse</th><th>Form</th><th>Best Odds</th><th>Trainer SR</th><th>Lay Score</th><th>Rating</th></tr></thead><tbody>'+rows+'</tbody></table></div></div></div>';
+    raceCount++;
+  });
+
+  document.getElementById('racesArea').innerHTML='<div class="results-head"><h2>Race-by-Race</h2><span class="meta">'+raceCount+' races &middot; '+totalQual+' runners at &le; 8/1</span></div>'+racesHTML;
+  document.getElementById('resultsArea').classList.remove('hidden');
+  rebuildSummary();
+
+  var formCount=allRunnerData.filter(function(r){return r.form}).length;
+  var tsrCount=allRunnerData.filter(function(r){return r.tsr}).length;
+  msg('Loaded '+raceCount+' races, '+totalQual+' runners at ≤ 8/1. '+formCount+' form and '+tsrCount+' trainer stats auto-filled. Edit any field to adjust scores.','ok');
+  document.getElementById('parseStatus').textContent=raceCount+' races, '+totalQual+' runners';
+}
+
+/* ══════════════════════════════════════════════
+   LIVE RECALC + SUMMARY
+   ══════════════════════════════════════════════ */
+function recalc(rid){
+  var formEl=document.getElementById('form_'+rid);
+  var tsrEl=document.getElementById('tsr_'+rid);
+  var runner=allRunnerData.find(function(r){return r.id===rid});
+  if(!runner)return;
+  var formVal=formEl?formEl.value.trim():'';
+  var tsrVal=tsrEl?tsrEl.value.trim():'';
+  if(formEl)formEl.classList.toggle('filled',formVal.length>0);
+  if(tsrEl)tsrEl.classList.toggle('filled',tsrVal.length>0);
+  var sc=layScore(formVal,tsrVal||null,runner.odds);
+  var rating=layRating(sc.total);
+  var scoreEl=document.getElementById('score_'+rid);
+  if(scoreEl){
+    scoreEl.setAttribute('data-tip','T:'+sc.t+' F:'+sc.f+' O:'+sc.o);
+    scoreEl.innerHTML='<span class="score-num">'+sc.total+'</span><div class="score-track"><div class="score-fill" style="width:'+sc.total+'%"></div></div>';
+  }
+  var badgeEl=document.getElementById('badge_'+rid);
+  if(badgeEl){badgeEl.className='badge '+rating.cls;badgeEl.textContent=rating.label}
+  runner.lastScore=sc;runner.lastRating=rating;runner.form=formVal;runner.tsr=tsrVal;
+  rebuildSummary();
+}
+
+function rebuildSummary(){
+  var scored=allRunnerData.filter(function(r){return r.lastScore&&r.lastScore.total>=45});
+  scored.sort(function(a,b){return b.lastScore.total-a.lastScore.total});
+  var top=scored.slice(0,8);
+  var el=document.getElementById('summaryArea');
+  if(!top.length){
+    el.innerHTML='<div class="summary"><div class="summary-head"><h2>Lay Candidates</h2><span class="date-label">'+allRunnerData.length+' runners</span></div><div class="summary-body"><div class="summary-empty">No runners scoring 45+ yet. Edit form and trainer data to improve accuracy.</div></div></div>';
+    return;
+  }
+  var rows=top.map(function(r,i){
+    return'<tr>'
+      +'<td style="color:var(--lay);font-weight:700;width:30px">'+(i+1)+'</td>'
+      +'<td><span class="horse-name">'+esc(r.horse)+'</span></td>'
+      +'<td style="font-size:12px">'+esc(r.time)+' '+esc(r.course)+'</td>'
+      +'<td><span class="odds">'+esc(r.frac)+'</span></td>'
+      +'<td><span class="form">'+renderFormHTML(r.form||'')+'</span></td>'
+      +'<td style="font-family:var(--mono);font-size:12px">'+(r.tsr||'—')+'%</td>'
+      +'<td style="font-family:var(--mono);font-weight:700;font-size:15px">'+r.lastScore.total+'</td>'
+      +'<td><span class="badge '+r.lastRating.cls+'">'+r.lastRating.label+'</span></td>'
+      +'</tr>';
+  }).join('');
+  el.innerHTML='<div class="summary"><div class="summary-head"><h2>Top Lay Candidates</h2><span class="date-label">'+scored.length+' scored 45+</span></div><div class="summary-body"><div class="tbl-wrap"><table><thead><tr><th>#</th><th>Horse</th><th>Race</th><th>Odds</th><th>Form</th><th>Trainer</th><th>Score</th><th>Rating</th></tr></thead><tbody>'+rows+'</tbody></table></div></div></div>';
+}
+
+/* ══════════════════════════════════════════════
+   PASTE FALLBACK
+   ══════════════════════════════════════════════ */
+function parseAndRender(){
+  var text=document.getElementById('pasteBox').value;
+  if(!text.trim()){msg('Paste racecard text first.','error');return}
+  msgClear();removeDemoFlag();allRunnerData=[];
+
+  /* Check for multiple races (look for time+course patterns) */
+  var lines=text.split(/\n/).map(function(l){return l.trim()});
+  var raceChunks=[],current=[];
+  for(var i=0;i<lines.length;i++){
+    var hasTime=/\b\d{1,2}[:.]\d{2}\b/.test(lines[i]);
+    var hasCourse=false;var ll=lines[i].toLowerCase();
+    ALL_COURSES.forEach(function(c){if(ll.indexOf(c)>=0)hasCourse=true});
+    if(hasTime&&hasCourse&&current.length>3){raceChunks.push(current);current=[lines[i]]}
+    else current.push(lines[i]);
+  }
+  if(current.length>2)raceChunks.push(current);
+
+  var results=[];
+  if(raceChunks.length>=2){
+    raceChunks.forEach(function(chunk){
+      var r=parseRacecardText(chunk.join('\n'));
+      if(r.horses.length)results.push(r);
+    });
+  }else{
+    var r=parseRacecardText(text);
+    if(r.horses.length)results.push(r);
+  }
+
+  if(!results.length){
+    msg('Could not parse any runners. Try selecting more of the racecard page before copying.','error');
+    return;
+  }
+  renderHorses(results);
+}
+
+/* Auto-parse on paste */
+document.getElementById('pasteBox').addEventListener('paste',function(){
+  var self=this;
+  setTimeout(function(){if(self.value.trim().length>20)parseAndRender()},100);
+});
+
+function clearAll(){
+  document.getElementById('pasteBox').value='';
+  document.getElementById('raceUrl').value='';
+  document.getElementById('resultsArea').classList.add('hidden');
+  document.getElementById('parseStatus').textContent='';
+  allRunnerData=[];msgClear();removeDemoFlag();
+}
+function removeDemoFlag(){var f=document.getElementById('demoFlag');if(f)f.remove()}
+
+/* ══════════════════════════════════════════════
+   DEMO
+   ══════════════════════════════════════════════ */
+function loadDemo(){
+  msgClear();removeDemoFlag();allRunnerData=[];
+
+  var demoResults=[
+    {raceInfo:{course:'Newmarket',time:'14:10',desc:'Weatherbys Novice Stakes 7f'},horses:[
+      {name:'Midnight Storm',form:'21-3',odds:'7/2',oddsDecimal:4.5,trainer:'J Gosden',trainerPct:14},
+      {name:'Royal Decree',form:'42-15',odds:'6/4',oddsDecimal:2.5,trainer:'A Balding',trainerPct:16},
+      {name:'Harbour Wind',form:'600-80',odds:'5/1',oddsDecimal:6.0,trainer:'M Bell',trainerPct:6},
+      {name:'Dawn Eagle',form:'43-2',odds:'2/1',oddsDecimal:3.0,trainer:'C Appleby',trainerPct:18},
+      {name:'Noble Quest',form:'00-608',odds:'4/1',oddsDecimal:5.0,trainer:'R Beckett',trainerPct:5}
+    ]},
+    {raceInfo:{course:'Ascot',time:'15:05',desc:'Buckingham Palace Handicap 1m'},horses:[
+      {name:'Silent Reign',form:'312-14',odds:'5/2',oddsDecimal:3.5,trainer:'W Haggas',trainerPct:19},
+      {name:'Warrior King',form:'111-21',odds:'Evs',oddsDecimal:2.0,trainer:'J Gosden',trainerPct:20},
+      {name:'Painted Lady',form:'0-06090',odds:'7/1',oddsDecimal:8.0,trainer:'D Simcock',trainerPct:0},
+      {name:'Blue Diamond',form:'4-3215',odds:'2/1',oddsDecimal:3.0,trainer:'R Varian',trainerPct:18},
+      {name:'Frosty Morning',form:'55-006',odds:'9/2',oddsDecimal:5.5,trainer:'H Palmer',trainerPct:5}
+    ]},
+    {raceInfo:{course:'Goodwood',time:'15:40',desc:'Kincsem Handicap Stakes 1m2f'},horses:[
+      {name:'Drifter',form:'0-60804',odds:'3/1',oddsDecimal:4.0,trainer:'A Carson',trainerPct:5},
+      {name:'High Society',form:'1-1231',odds:'4/5',oddsDecimal:1.8,trainer:'A O\'Brien',trainerPct:22},
+      {name:'Muddy Boots',form:'000-06',odds:'6/1',oddsDecimal:7.0,trainer:'J Fanshawe',trainerPct:0},
+      {name:'Fortune Bay',form:'5-0070',odds:'5/1',oddsDecimal:6.0,trainer:'M Channon',trainerPct:4},
+      {name:'Last Orders',form:'8-4053',odds:'4/1',oddsDecimal:5.0,trainer:'C Hills',trainerPct:14}
+    ]},
+    {raceInfo:{course:'York',time:'16:15',desc:'Knavesmire Fillies Handicap 6f'},horses:[
+      {name:'Lady Phoenix',form:'60-058',odds:'4/1',oddsDecimal:5.0,trainer:'K Ryan',trainerPct:6},
+      {name:'Star Sapphire',form:'1-2132',odds:'6/4',oddsDecimal:2.5,trainer:'R Varian',trainerPct:20},
+      {name:'Velvet Rose',form:'0-P0600',odds:'15/2',oddsDecimal:8.5,trainer:'T Dascombe',trainerPct:0},
+      {name:'Dancing Fire',form:'4-3512',odds:'3/1',oddsDecimal:4.0,trainer:'W Haggas',trainerPct:21}
+    ]}
+  ];
+
+  renderHorses(demoResults);
+  document.getElementById('resultsArea').insertAdjacentHTML('beforebegin',
+    '<div class="demo-flag" id="demoFlag">Demo mode — sample data. Click <strong>Load Today\'s UK Flat Races</strong> for live data from Racing Post (requires Vercel hosting).</div>');
+}
+</script>
+
+</body>
+</html>
