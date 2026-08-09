@@ -266,9 +266,10 @@
 var PROXY = '/api/racing-proxy?url=';
 var RACECARDS_API = '/api/racecards';
 var RP_BASE = 'https://www.racingpost.com';
-var UK_COURSES = ['ascot','ayr','bath','beverley','brighton','carlisle','catterick','chelmsford','chelmsford city','chester','chepstow','doncaster','epsom','epsom downs','ffos las','goodwood','hamilton','haydock','haydock park','kempton','kempton park','leicester','lingfield','lingfield park','musselburgh','newbury','newcastle','newmarket','nottingham','pontefract','redcar','ripon','salisbury','sandown','sandown park','southwell','thirsk','wetherby','windsor','wolverhampton','yarmouth','york'];
-var JUMP_COURSES = ['aintree','bangor','bangor-on-dee','cartmel','cheltenham','exeter','fakenham','fontwell','fontwell park','hereford','hexham','huntingdon','kelso','ludlow','market rasen','newton abbot','perth','plumpton','sedgefield','stratford','taunton','towcester','uttoxeter','warwick','wincanton','worcester'];
-var ALL_COURSES = UK_COURSES.concat(JUMP_COURSES);
+/* UK flat course names — used for EXACT matching, not substring */
+var UK_FLAT_NAMES = ['ascot','ayr','bath','beverley','brighton','carlisle','catterick','catterick bridge','chelmsford','chelmsford city','chepstow','chester','doncaster','epsom','epsom downs','ffos las','goodwood','great yarmouth','yarmouth','hamilton','hamilton park','haydock','haydock park','kempton','kempton park','leicester','lingfield','lingfield park','musselburgh','newbury','newcastle','newmarket','nottingham','pontefract','redcar','ripon','salisbury','sandown','sandown park','southwell','thirsk','wetherby','windsor','wolverhampton','york'];
+/* UK flat course slugs (with hyphens) for URL matching */
+var UK_FLAT_SLUGS = ['ascot','ayr','bath','beverley','brighton','carlisle','catterick','catterick-bridge','chelmsford','chelmsford-city','chepstow','chester','doncaster','epsom','epsom-downs','ffos-las','goodwood','great-yarmouth','yarmouth','hamilton','hamilton-park','haydock','haydock-park','kempton','kempton-park','leicester','lingfield','lingfield-park','musselburgh','newbury','newcastle','newmarket','nottingham','pontefract','redcar','ripon','salisbury','sandown','sandown-park','southwell','thirsk','wetherby','windsor','wolverhampton','york'];
 var JUMP_RE = /chase|chs|hurdle|hdl|nh\s?flat|nhf|bumper|steeplechase|national hunt/i;
 var COUNTRY_RE = /\((IRE|GB|FR|USA|GER|ITY|SAF|AUS|NZ|CAN|UAE|JPN|SPA|BRZ|ARG)\)/gi;
 var allRunnerData = [];
@@ -1008,31 +1009,43 @@ function fracToDec(s){
   return(+m[1]/ +m[2])+1;
 }
 
+/* Check if a course name matches a known UK flat course (exact, not substring) */
+function isUKFlatCourse(name){
+  if(!name)return false;
+  var n=name.toLowerCase().trim();
+  /* Direct match */
+  if(UK_FLAT_NAMES.indexOf(n)>=0)return true;
+  /* Remove common suffixes like (AW), Racecourse */
+  var cleaned=n.replace(/\s*\(aw\)|\s*\(turf\)|\s*racecourse/gi,'').trim();
+  if(UK_FLAT_NAMES.indexOf(cleaned)>=0)return true;
+  /* Check if any UK name matches the start (e.g. "Haydock Park Racecourse") */
+  for(var i=0;i<UK_FLAT_NAMES.length;i++){
+    if(cleaned===UK_FLAT_NAMES[i]||cleaned.indexOf(UK_FLAT_NAMES[i]+' ')===0)return true;
+  }
+  return false;
+}
+
+/* Check if a URL slug matches a known UK flat course (exact) */
+function isUKFlatSlug(slug){
+  return UK_FLAT_SLUGS.indexOf(slug.toLowerCase())>=0;
+}
+
 /* Filter race results to UK flat only */
 function filterUKFlat(results){
   return results.filter(function(r){
-    var courseLower=(r.raceInfo.course||'').toLowerCase();
+    var courseName=(r.raceInfo.course||'').trim();
     var descLower=(r.raceInfo.desc||'').toLowerCase();
-    var combined=courseLower+' '+descLower;
-    /* Check if it's a UK course */
-    var isUK=UK_COURSES.some(function(c){return courseLower.indexOf(c)>=0});
-    /* If no course name, check trainer names for non-UK indicators */
-    if(!courseLower){
-      /* If ALL trainers look non-UK (Australian, etc.), skip */
-      var trainers=(r.horses||[]).map(function(h){return(h.trainer||'').toLowerCase()});
-      var ausTrainers=['chris waller','michael freedman','john o\'shea','gai waterhouse',
-        'james cummings','peter moody','ciaron maher','david hayes','aidan o\'brien'];
-      var nonUKCount=0;
-      trainers.forEach(function(t){
-        if(ausTrainers.some(function(a){return t.indexOf(a)>=0}))nonUKCount++;
-      });
-      /* If more than half of trainers look non-UK, probably not a UK race */
-      if(trainers.length>2&&nonUKCount>trainers.length/2)return false;
-      isUK=true;
-    }
-    /* Check if it's jump racing */
-    var isJump=JUMP_RE.test(combined)||JUMP_COURSES.some(function(c){return courseLower.indexOf(c)>=0});
-    return isUK&&!isJump;
+
+    /* Must have a course name — unknown courses are NOT kept */
+    if(!courseName)return false;
+
+    /* Course must be a known UK flat course (exact match) */
+    if(!isUKFlatCourse(courseName))return false;
+
+    /* Must not be a jump race */
+    if(JUMP_RE.test(descLower))return false;
+
+    return true;
   });
 }
 
@@ -1080,7 +1093,7 @@ function parseRacecardText(text){
 function extractTextRaceInfo(lines){
   var info={course:'',time:'',desc:''};
   var searchText=lines.slice(0,15).join(' ').toLowerCase();
-  ALL_COURSES.forEach(function(c){if(searchText.indexOf(c)>=0&&!info.course)info.course=c.replace(/\b\w/g,function(x){return x.toUpperCase()})});
+  UK_FLAT_NAMES.forEach(function(c){if(searchText.indexOf(c)>=0&&!info.course)info.course=c.replace(/\b\w/g,function(x){return x.toUpperCase()})});
   for(var i=0;i<Math.min(lines.length,15);i++){
     var tm=lines[i].match(/\b(\d{1,2})[:.]\s?(\d{2})\b/);
     if(tm&&!info.time){info.time=tm[1]+':'+tm[2];break}
@@ -1224,12 +1237,17 @@ async function loadToday(){
       return;
     }
 
-    /* Filter for UK flat courses */
+    /* Filter for UK flat courses — extract slug from URL and do exact match */
     var ukFlat = raceLinks.filter(function(r){
-      var slug=(r.href+' '+r.text).toLowerCase();
-      var isUK=UK_COURSES.some(function(c){return slug.indexOf(c)>=0});
-      var isJump=JUMP_RE.test(slug)||JUMP_COURSES.some(function(c){return slug.indexOf(c)>=0});
-      return isUK&&!isJump;
+      /* Extract course slug from URL: /racecards/{id}/{slug}/{date}/{raceId} */
+      var slugMatch=r.href.match(/\/racecards\/\d+\/([^/]+)\//);
+      if(!slugMatch)return false;
+      var slug=slugMatch[1].toLowerCase();
+      /* Exact slug match against known UK flat courses */
+      if(!isUKFlatSlug(slug))return false;
+      /* Check race description for jump indicators */
+      if(JUMP_RE.test(r.text||''))return false;
+      return true;
     });
 
     /* De-duplicate by race ID (last segment of URL) */
@@ -1491,7 +1509,7 @@ function parseAndRender(){
   for(var i=0;i<lines.length;i++){
     var hasTime=/\b\d{1,2}[:.]\d{2}\b/.test(lines[i]);
     var hasCourse=false;var ll=lines[i].toLowerCase();
-    ALL_COURSES.forEach(function(c){if(ll.indexOf(c)>=0)hasCourse=true});
+    UK_FLAT_NAMES.forEach(function(c){if(ll.indexOf(c)>=0)hasCourse=true});
     if(hasTime&&hasCourse&&current.length>3){raceChunks.push(current);current=[lines[i]]}
     else current.push(lines[i]);
   }

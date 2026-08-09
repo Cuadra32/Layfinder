@@ -4,17 +4,53 @@
  * Handles __NEXT_DATA__, self.__next_f.push() (RSC), and raw HTML parsing.
  */
 
-const UK_COURSES = ['ascot','ayr','bath','beverley','brighton','carlisle','catterick',
-  'chelmsford','chelmsford city','chester','chepstow','doncaster','epsom','epsom downs',
-  'ffos las','goodwood','hamilton','haydock','haydock park','kempton','kempton park',
-  'leicester','lingfield','lingfield park','musselburgh','newbury','newcastle','newmarket',
-  'nottingham','pontefract','redcar','ripon','salisbury','sandown','sandown park',
-  'southwell','thirsk','wetherby','windsor','wolverhampton','yarmouth','york'];
+/**
+ * UK courses that host flat racing — exact Racing Post URL slugs.
+ * Used for whitelist matching: the slug from the URL must be in this set.
+ */
+const UK_FLAT_SLUGS = new Set([
+  'ascot','ayr','bath','beverley','brighton','carlisle',
+  'catterick','catterick-bridge',
+  'chelmsford','chelmsford-city',
+  'chepstow','chester','doncaster',
+  'epsom','epsom-downs',
+  'ffos-las','goodwood',
+  'great-yarmouth','yarmouth',
+  'hamilton','hamilton-park',
+  'haydock','haydock-park',
+  'kempton','kempton-park',
+  'leicester',
+  'lingfield','lingfield-park',
+  'musselburgh','newbury','newcastle','newmarket',
+  'nottingham','pontefract','redcar','ripon','salisbury',
+  'sandown','sandown-park',
+  'southwell','thirsk','wetherby','windsor',
+  'wolverhampton','york'
+]);
 
-const JUMP_COURSES = ['aintree','bangor','bangor-on-dee','cartmel','cheltenham','exeter',
-  'fakenham','fontwell','fontwell park','hereford','hexham','huntingdon','kelso','ludlow',
-  'market rasen','newton abbot','perth','plumpton','sedgefield','stratford','taunton',
-  'towcester','uttoxeter','warwick','wincanton','worcester'];
+/**
+ * UK flat course names (space-separated) for matching extracted data.
+ * Course names from JSON data get normalized and checked against this set.
+ */
+const UK_FLAT_NAMES = new Set([
+  'ascot','ayr','bath','beverley','brighton','carlisle',
+  'catterick','catterick bridge',
+  'chelmsford','chelmsford city',
+  'chepstow','chester','doncaster',
+  'epsom','epsom downs',
+  'ffos las','goodwood',
+  'great yarmouth','yarmouth',
+  'hamilton','hamilton park',
+  'haydock','haydock park',
+  'kempton','kempton park',
+  'leicester',
+  'lingfield','lingfield park',
+  'musselburgh','newbury','newcastle','newmarket',
+  'nottingham','pontefract','redcar','ripon','salisbury',
+  'sandown','sandown park',
+  'southwell','thirsk','wetherby','windsor',
+  'wolverhampton','york'
+]);
 
 const JUMP_RE = /chase|chs|hurdle|hdl|nh\s?flat|nhf|bumper|steeplechase|national hunt/i;
 
@@ -53,11 +89,39 @@ function findRaceUrls(html) {
   return Array.from(urls.values());
 }
 
+/**
+ * Check if a Racing Post URL slug is a UK flat course.
+ * Uses EXACT slug matching — no substring tricks.
+ */
 function isUKFlat(slug) {
-  const s = slug.toLowerCase().replace(/-/g, ' ');
-  const isUK = UK_COURSES.some(c => s.includes(c));
-  const isJump = JUMP_RE.test(s) || JUMP_COURSES.some(c => s === c);
-  return isUK && !isJump;
+  return UK_FLAT_SLUGS.has(slug.toLowerCase());
+}
+
+/**
+ * Check if a course name (from extracted JSON data) matches a UK flat course.
+ * Normalizes the name and checks against the known UK flat names set.
+ */
+function isUKFlatCourseName(name) {
+  if (!name) return false;
+  const n = name.toLowerCase().trim();
+  // Direct match
+  if (UK_FLAT_NAMES.has(n)) return true;
+  // Try without common suffixes like "(AW)" or extra text
+  const cleaned = n.replace(/\s*\(aw\)|\s*\(turf\)|\s*racecourse/gi, '').trim();
+  if (UK_FLAT_NAMES.has(cleaned)) return true;
+  // Check if any UK name matches the start of the course name
+  // e.g. "Haydock Park Racecourse" should match "haydock park"
+  for (const uk of UK_FLAT_NAMES) {
+    if (cleaned === uk || cleaned.startsWith(uk + ' ')) return true;
+  }
+  return false;
+}
+
+/**
+ * Check if a race description indicates jump racing (not flat).
+ */
+function isJumpRace(desc) {
+  return JUMP_RE.test(desc || '');
 }
 
 /* ── JSON extraction from HTML ──────────────────── */
@@ -230,6 +294,21 @@ function gatherRaceInfo(obj) {
     if (v && typeof v === 'object') {
       const n = v.name || v.courseName || v.displayName || v.venueName;
       if (n) { ri.course = n; break; }
+      // Also check for country inside course object
+      const cc = v.countryCode || v.country || v.region || v.regionCode;
+      if (cc) ri.country = String(cc).toUpperCase();
+    }
+  }
+
+  // Extract country/region if available
+  const countryKeys = ['countryCode','country','region','regionCode','meetingRegion',
+    'courseCountry','venueCountry','courseRegion','raceRegion','meetingCountry'];
+  if (!ri.country) {
+    for (const k of countryKeys) {
+      const v = obj[k];
+      if (typeof v === 'string' && v.length >= 2 && v.length <= 5) {
+        ri.country = v.toUpperCase(); break;
+      }
     }
   }
 
@@ -462,6 +541,7 @@ export default async function handler(req, res) {
           course: raceInfo.course || '',
           time: raceInfo.time || '',
           desc: raceInfo.desc || '',
+          country: raceInfo.country || '',
           horses,
           source
         });
@@ -497,13 +577,25 @@ export default async function handler(req, res) {
 
     // If we got good direct results, filter and return them
     if (directRaces.length >= 5) {
-      // Filter for UK flat
+      // Filter for UK flat — require positive identification, never keep unknowns
       directRaces = directRaces.filter(r => {
-        const c = r.course.toLowerCase();
-        if (!c) return true; // keep unknown courses for now
-        const isUK = UK_COURSES.some(k => c.includes(k));
-        const isJump = JUMP_RE.test(c + ' ' + r.desc) || JUMP_COURSES.some(k => c.includes(k));
-        return isUK && !isJump;
+        // Must have a course name — unknown courses are NOT kept
+        if (!r.course) return false;
+
+        // If country data is available, use it
+        if (r.country) {
+          const cc = r.country.toUpperCase();
+          // Only accept GB/UK — reject IRE, AUS, FR, USA, etc.
+          if (cc !== 'GB' && cc !== 'UK' && cc !== 'GBR') return false;
+        }
+
+        // Course name must match a known UK flat course (exact, not substring)
+        if (!isUKFlatCourseName(r.course)) return false;
+
+        // Must not be a jump race
+        if (isJumpRace(r.desc)) return false;
+
+        return true;
       });
 
       return res.status(200).json({
@@ -590,6 +682,9 @@ export default async function handler(req, res) {
             const key = horses.map(h => h.name.toLowerCase()).sort().join('|');
             if (seenKeys.has(key)) continue;
             seenKeys.add(key);
+
+            // Skip jump races at mixed venues (e.g. Haydock hurdle)
+            if (isJumpRace(raceInfo.desc)) continue;
 
             races.push({
               course: raceInfo.course || raceUrl.courseName || '',
