@@ -1,7 +1,6 @@
 /**
- * Debug endpoint: dumps raw Racing Post data structure.
- * Visit /api/debug-data to see what Racing Post actually returns.
- * This lets us see the real field names for horses, form, odds, etc.
+ * Debug endpoint v2: drills into __NEXT_DATA__.props.pageProps.initialState
+ * to find actual race/runner data structure from Racing Post.
  */
 
 const FETCH_HEADERS = {
@@ -11,343 +10,238 @@ const FETCH_HEADERS = {
   'Accept-Encoding': 'identity'
 };
 
+/**
+ * Recursively find arrays that look like runner/horse data.
+ * Returns path + sample items so we can see real field names.
+ */
+function findInterestingArrays(obj, path, depth, results) {
+  if (!obj || typeof obj !== 'object' || depth > 12) return;
+  results = results || [];
+
+  if (Array.isArray(obj)) {
+    if (obj.length >= 2 && obj[0] && typeof obj[0] === 'object' && !Array.isArray(obj[0])) {
+      const keys = Object.keys(obj[0]);
+      const keyStr = keys.join(',').toLowerCase();
+      // Check for runner-like, race-like, or meeting-like arrays
+      const runnerSignals = ['horse','name','runner','jockey','trainer','form','odds','silk',
+        'draw','cloth','number','uid','id','price','age','weight','rating'];
+      const raceSignals = ['race','time','off','runners','distance','class','going','prize'];
+      const meetingSignals = ['meeting','course','venue','races','country','region'];
+
+      let runnerHits = 0, raceHits = 0, meetingHits = 0;
+      for (const s of runnerSignals) { if (keyStr.includes(s)) runnerHits++; }
+      for (const s of raceSignals) { if (keyStr.includes(s)) raceHits++; }
+      for (const s of meetingSignals) { if (keyStr.includes(s)) meetingHits++; }
+
+      if (runnerHits >= 2 || raceHits >= 2 || meetingHits >= 2 || keys.length >= 5) {
+        // Summarize each item: show keys + values (truncated)
+        const summarize = (item) => {
+          const summary = {};
+          for (const [k, v] of Object.entries(item)) {
+            if (v === null || v === undefined) summary[k] = null;
+            else if (typeof v === 'string') summary[k] = v.length > 150 ? v.substring(0, 150) + '...' : v;
+            else if (typeof v === 'number' || typeof v === 'boolean') summary[k] = v;
+            else if (Array.isArray(v)) summary[k] = `[Array(${v.length})]`;
+            else if (typeof v === 'object') summary[k] = `{${Object.keys(v).slice(0, 8).join(',')}}`;
+          }
+          return summary;
+        };
+
+        results.push({
+          path,
+          arrayLength: obj.length,
+          signals: { runner: runnerHits, race: raceHits, meeting: meetingHits },
+          firstItemKeys: keys,
+          sample: obj.slice(0, 2).map(summarize)
+        });
+      }
+    }
+    // Search inside array items
+    for (let i = 0; i < Math.min(obj.length, 5); i++) {
+      if (obj[i] && typeof obj[i] === 'object') {
+        findInterestingArrays(obj[i], path + '[' + i + ']', depth + 1, results);
+      }
+    }
+  } else {
+    for (const k of Object.keys(obj)) {
+      if (obj[k] && typeof obj[k] === 'object') {
+        findInterestingArrays(obj[k], path + '.' + k, depth + 1, results);
+      }
+    }
+  }
+  return results;
+}
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache');
 
-  const result = {
-    timestamp: new Date().toISOString(),
-    steps: []
-  };
+  const result = { timestamp: new Date().toISOString() };
 
   try {
-    // Step 1: Fetch racecards index
+    // ── Part A: Inspect the racecards INDEX page ──
     const indexResp = await fetch('https://www.racingpost.com/racecards/', {
       headers: FETCH_HEADERS, redirect: 'follow'
     });
-
     if (!indexResp.ok) {
-      result.error = 'Racing Post returned HTTP ' + indexResp.status;
-      return res.status(200).json(result);
+      return res.status(200).json({ error: 'HTTP ' + indexResp.status });
     }
-
     const html = await indexResp.text();
-    result.steps.push({
-      step: 'index_fetched',
-      htmlLength: html.length,
-      hasNextData: /__NEXT_DATA__/.test(html),
-      hasRSC: /self\.__next_f/.test(html),
-      scriptCount: (html.match(/<script/gi) || []).length
-    });
 
-    // Step 2: Extract __NEXT_DATA__
-    const nextDataRe = /<script\s+id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i;
-    const ndm = html.match(nextDataRe);
-    if (ndm) {
-      try {
-        const nd = JSON.parse(ndm[1]);
-        result.nextData = {
-          topKeys: Object.keys(nd),
-          propsKeys: nd.props ? Object.keys(nd.props) : null,
-          pagePropsKeys: nd.props && nd.props.pageProps ? Object.keys(nd.props.pageProps) : null,
-          // Sample the structure
-          pagePropsSnippet: nd.props && nd.props.pageProps
-            ? JSON.stringify(nd.props.pageProps).substring(0, 5000)
-            : null
-        };
-      } catch (e) {
-        result.nextData = { error: e.message };
-      }
+    // Parse __NEXT_DATA__
+    const ndm = html.match(/<script\s+id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i);
+    if (!ndm) {
+      return res.status(200).json({ error: 'No __NEXT_DATA__ found', htmlLength: html.length });
     }
 
-    // Step 3: Extract RSC payloads
-    const pushRe = /self\.__next_f\.push\(\[(\d+),"((?:[^"\\]|\\.)*)"\]\)/g;
-    let pm;
-    let rscChunks = [];
-    let rscText = '';
-    while ((pm = pushRe.exec(html)) !== null) {
-      let unescaped;
-      try {
-        unescaped = JSON.parse('"' + pm[2] + '"');
-      } catch (e) {
-        unescaped = pm[2].replace(/\\n/g, '\n').replace(/\\t/g, '\t')
-          .replace(/\\"/g, '"').replace(/\\\//g, '/').replace(/\\\\/g, '\\');
-      }
-      rscChunks.push(unescaped);
-      rscText += unescaped + '\n';
-    }
+    const nextData = JSON.parse(ndm[1]);
+    const pageProps = nextData.props?.pageProps || {};
+    const initialState = pageProps.initialState || {};
 
-    result.rsc = {
-      chunkCount: rscChunks.length,
-      totalTextLength: rscText.length,
-      // Show first 3 chunks as sample
-      sampleChunks: rscChunks.slice(0, 3).map(c => c.substring(0, 500))
+    result.indexPage = {
+      nextDataTopKeys: Object.keys(nextData),
+      pagePropsKeys: Object.keys(pageProps),
+      initialStateKeys: Object.keys(initialState)
     };
 
-    // Step 4: Parse RSC lines and find JSON objects
-    const jsonObjects = [];
-    const lines = rscText.split('\n');
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      const colonIdx = trimmed.indexOf(':');
-      if (colonIdx < 0 || colonIdx > 6) continue;
-      const prefix = trimmed.substring(0, colonIdx);
-      if (!/^[\da-fA-F]+$/.test(prefix)) continue;
-      const data = trimmed.substring(colonIdx + 1);
-      if (data.length > 2 && (data[0] === '{' || data[0] === '[')) {
-        try {
-          const parsed = JSON.parse(data);
-          jsonObjects.push({ prefix, type: Array.isArray(parsed) ? 'array' : 'object', data: parsed });
-        } catch (e) {
-          // Try array parsing
-          if (data[0] === '[') {
-            try {
-              const arr = JSON.parse(data);
-              jsonObjects.push({ prefix, type: 'array', data: arr });
-            } catch (e2) {}
-          }
+    // Drill into initialState — show keys at each level
+    for (const [k, v] of Object.entries(initialState)) {
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        result.indexPage['initialState.' + k + '.keys'] = Object.keys(v).slice(0, 20);
+      } else if (Array.isArray(v)) {
+        result.indexPage['initialState.' + k] = `[Array(${v.length})]`;
+        if (v.length > 0 && v[0] && typeof v[0] === 'object') {
+          result.indexPage['initialState.' + k + '[0].keys'] = Object.keys(v[0]).slice(0, 30);
         }
       }
     }
 
-    result.steps.push({
-      step: 'rsc_parsed',
-      jsonObjectCount: jsonObjects.length
-    });
+    // Find all interesting arrays in the __NEXT_DATA__
+    const indexArrays = findInterestingArrays(nextData, 'nextData', 0);
+    // Sort by total signals
+    indexArrays.sort((a, b) => (b.signals.runner + b.signals.race + b.signals.meeting) - (a.signals.runner + a.signals.race + a.signals.meeting));
+    result.indexPage.interestingArrays = indexArrays.slice(0, 10);
 
-    // Step 5: Find arrays that look like runner/horse data
-    const runnerLikeArrays = [];
-    function searchForArrays(obj, path, depth) {
-      if (!obj || typeof obj !== 'object' || depth > 10) return;
-      if (Array.isArray(obj)) {
-        if (obj.length >= 2 && obj[0] && typeof obj[0] === 'object' && !Array.isArray(obj[0])) {
-          const keys = Object.keys(obj[0]);
-          // Check if it looks like runner data
-          const keyStr = keys.join(',').toLowerCase();
-          const signals = ['horse','name','runner','jockey','trainer','form','odds','silk',
-            'draw','cloth','number','saddlecloth','saddle','uid','id','price','weight',
-            'age','sex','rating','rpr','topspeed','ts','bred','sire','dam','owner',
-            'colour','headgear','blinkers','visor','cheekpieces','tongue'];
-          let hits = 0;
-          for (const s of signals) {
-            if (keyStr.includes(s)) hits++;
-          }
-          if (hits >= 2 || (keys.length >= 4 && keys.length <= 50)) {
-            runnerLikeArrays.push({
-              path,
-              arrayLength: obj.length,
-              firstItemKeys: keys,
-              signalHits: hits,
-              // Show first 2 items raw
-              sampleItems: obj.slice(0, 2)
-            });
-          }
-        }
-        // Search items
-        for (let i = 0; i < Math.min(obj.length, 5); i++) {
-          searchForArrays(obj[i], path + '[' + i + ']', depth + 1);
-        }
-      } else {
-        for (const k of Object.keys(obj)) {
-          searchForArrays(obj[k], path + '.' + k, depth + 1);
-        }
-      }
-    }
-
-    for (let i = 0; i < jsonObjects.length; i++) {
-      searchForArrays(jsonObjects[i].data, 'rsc[' + jsonObjects[i].prefix + ']', 0);
-    }
-
-    // Sort by signal hits
-    runnerLikeArrays.sort((a, b) => b.signalHits - a.signalHits);
-
-    result.runnerArrays = {
-      found: runnerLikeArrays.length,
-      // Show top 5 most likely runner arrays
-      top: runnerLikeArrays.slice(0, 5)
-    };
-
-    // Step 6: Find race URLs
+    // Find race URLs in the HTML
     const clean = html.replace(/\\+\//g, '/');
     const urlRe = /\/racecards\/(\d+)\/([a-z][a-z0-9-]+)\/(\d{4}-\d{2}-\d{2})\/(\d+)/gi;
     const urls = [];
     const seenUrls = new Set();
     let um;
     while ((um = urlRe.exec(clean)) !== null) {
-      const href = um[0];
-      if (!seenUrls.has(href)) {
-        seenUrls.add(href);
-        urls.push({
-          href,
-          courseId: um[1],
-          slug: um[2],
-          date: um[3],
-          raceId: um[4]
-        });
+      if (!seenUrls.has(um[0])) {
+        seenUrls.add(um[0]);
+        urls.push({ href: um[0], courseId: um[1], slug: um[2], date: um[3], raceId: um[4] });
       }
     }
 
-    // Group by slug
-    const slugCounts = {};
+    const slugGroups = {};
     for (const u of urls) {
-      slugCounts[u.slug] = (slugCounts[u.slug] || 0) + 1;
+      if (!slugGroups[u.slug]) slugGroups[u.slug] = [];
+      slugGroups[u.slug].push(u.courseId);
     }
-
-    result.urls = {
+    result.indexPage.raceUrls = {
       total: urls.length,
-      slugCounts,
-      // Show first 10 URLs
-      sample: urls.slice(0, 10)
+      slugGroups: Object.fromEntries(
+        Object.entries(slugGroups).map(([slug, ids]) => [slug, { count: ids.length, courseIds: [...new Set(ids)] }])
+      ),
+      sampleUrls: urls.slice(0, 5)
     };
 
-    // Step 7: Fetch ONE race page and dump its data structure
-    if (urls.length > 0) {
-      // Pick a UK-looking URL if possible
-      const ukSlugs = new Set(['ascot','ayr','bath','beverley','brighton','carlisle',
-        'catterick','catterick-bridge','chelmsford','chelmsford-city','chepstow','chester',
-        'doncaster','epsom','epsom-downs','ffos-las','goodwood','great-yarmouth','yarmouth',
-        'hamilton','hamilton-park','haydock','haydock-park','kempton','kempton-park',
-        'leicester','lingfield','lingfield-park','musselburgh','newbury','newcastle',
-        'newmarket','nottingham','pontefract','redcar','ripon','salisbury','sandown',
-        'sandown-park','southwell','thirsk','wetherby','windsor','wolverhampton','york']);
+    // ── Part B: Fetch ONE individual race page and inspect it ──
+    const ukSlugs = new Set(['ascot','ayr','bath','beverley','brighton','carlisle',
+      'catterick','catterick-bridge','chelmsford','chelmsford-city','chepstow','chester',
+      'doncaster','epsom','epsom-downs','ffos-las','goodwood','great-yarmouth','yarmouth',
+      'hamilton','hamilton-park','haydock','haydock-park','kempton','kempton-park',
+      'leicester','lingfield','lingfield-park','musselburgh','newbury','newcastle',
+      'newmarket','nottingham','pontefract','redcar','ripon','salisbury','sandown',
+      'sandown-park','southwell','thirsk','wetherby','windsor','wolverhampton','york']);
 
-      const target = urls.find(u => ukSlugs.has(u.slug)) || urls[0];
+    const target = urls.find(u => ukSlugs.has(u.slug)) || urls[0];
 
+    if (target) {
       try {
         const raceResp = await fetch('https://www.racingpost.com' + target.href, {
-          headers: FETCH_HEADERS,
-          redirect: 'follow',
+          headers: FETCH_HEADERS, redirect: 'follow',
           signal: AbortSignal.timeout(6000)
         });
 
         if (raceResp.ok) {
           const raceHtml = await raceResp.text();
-
-          // Extract JSON from race page
-          const raceJsonObjects = [];
-
-          // __NEXT_DATA__
           const rndm = raceHtml.match(/<script\s+id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i);
+
           if (rndm) {
-            try {
-              raceJsonObjects.push({ source: '__NEXT_DATA__', data: JSON.parse(rndm[1]) });
-            } catch (e) {}
-          }
+            const raceNextData = JSON.parse(rndm[1]);
+            const racePageProps = raceNextData.props?.pageProps || {};
+            const raceInitialState = racePageProps.initialState || {};
 
-          // RSC payloads from race page
-          const racePushRe = /self\.__next_f\.push\(\[(\d+),"((?:[^"\\]|\\.)*)"\]\)/g;
-          let rpm;
-          let raceRscText = '';
-          while ((rpm = racePushRe.exec(raceHtml)) !== null) {
-            let unescaped;
-            try {
-              unescaped = JSON.parse('"' + rpm[2] + '"');
-            } catch (e) {
-              unescaped = rpm[2].replace(/\\n/g, '\n').replace(/\\t/g, '\t')
-                .replace(/\\"/g, '"').replace(/\\\//g, '/').replace(/\\\\/g, '\\');
-            }
-            raceRscText += unescaped + '\n';
-          }
+            result.racePage = {
+              url: target.href,
+              slug: target.slug,
+              courseId: target.courseId,
+              pagePropsKeys: Object.keys(racePageProps),
+              initialStateKeys: Object.keys(raceInitialState)
+            };
 
-          // Parse RSC lines
-          const raceLines = raceRscText.split('\n');
-          for (const rl of raceLines) {
-            const trimmed = rl.trim();
-            if (!trimmed) continue;
-            const colonIdx = trimmed.indexOf(':');
-            if (colonIdx < 0 || colonIdx > 6) continue;
-            const prefix = trimmed.substring(0, colonIdx);
-            if (!/^[\da-fA-F]+$/.test(prefix)) continue;
-            const data = trimmed.substring(colonIdx + 1);
-            if (data.length > 2 && (data[0] === '{' || data[0] === '[')) {
-              try {
-                raceJsonObjects.push({ source: 'RSC:' + prefix, data: JSON.parse(data) });
-              } catch (e) {}
-            }
-          }
-
-          // Search for runner arrays in race page data
-          const raceRunnerArrays = [];
-          function searchRacePage(obj, path, depth) {
-            if (!obj || typeof obj !== 'object' || depth > 10) return;
-            if (Array.isArray(obj)) {
-              if (obj.length >= 2 && obj[0] && typeof obj[0] === 'object' && !Array.isArray(obj[0])) {
-                const keys = Object.keys(obj[0]);
-                const keyStr = keys.join(',').toLowerCase();
-                const signals = ['horse','name','runner','jockey','trainer','form','odds',
-                  'silk','draw','cloth','number','saddlecloth','uid','id','price','weight'];
-                let hits = 0;
-                for (const s of signals) {
-                  if (keyStr.includes(s)) hits++;
-                }
-                if (hits >= 2) {
-                  raceRunnerArrays.push({
-                    path,
-                    arrayLength: obj.length,
-                    firstItemKeys: keys,
-                    signalHits: hits,
-                    // Show first 2 items completely
-                    sampleItems: obj.slice(0, 2)
-                  });
+            // Show structure of initialState
+            for (const [k, v] of Object.entries(raceInitialState)) {
+              if (v && typeof v === 'object' && !Array.isArray(v)) {
+                result.racePage['state.' + k + '.keys'] = Object.keys(v).slice(0, 25);
+              } else if (Array.isArray(v)) {
+                result.racePage['state.' + k] = `[Array(${v.length})]`;
+                if (v.length > 0 && v[0] && typeof v[0] === 'object') {
+                  result.racePage['state.' + k + '[0].keys'] = Object.keys(v[0]).slice(0, 30);
                 }
               }
-              for (let i = 0; i < Math.min(obj.length, 3); i++) {
-                searchRacePage(obj[i], path + '[' + i + ']', depth + 1);
-              }
-            } else {
-              for (const k of Object.keys(obj)) {
-                searchRacePage(obj[k], path + '.' + k, depth + 1);
+            }
+
+            // Find runner arrays in race page data
+            const raceArrays = findInterestingArrays(raceNextData, 'raceData', 0);
+            raceArrays.sort((a, b) => (b.signals.runner + b.signals.race + b.signals.meeting) - (a.signals.runner + a.signals.race + a.signals.meeting));
+            result.racePage.interestingArrays = raceArrays.slice(0, 8);
+
+            // Also try to find race-level info (course, time, etc.)
+            // Look for any string fields at the pageProps level
+            const raceMetadata = {};
+            for (const [k, v] of Object.entries(racePageProps)) {
+              if (typeof v === 'string' && v.length > 0 && v.length < 200) {
+                raceMetadata[k] = v;
+              } else if (typeof v === 'number') {
+                raceMetadata[k] = v;
               }
             }
+            if (Object.keys(raceMetadata).length) {
+              result.racePage.metadata = raceMetadata;
+            }
+
+          } else {
+            // Check for RSC on race page
+            const hasRSC = /self\.__next_f/.test(raceHtml);
+            result.racePage = {
+              url: target.href,
+              error: 'No __NEXT_DATA__ on race page',
+              hasRSC,
+              htmlLength: raceHtml.length
+            };
+
+            if (hasRSC) {
+              // Extract RSC and look for data
+              const pushRe = /self\.__next_f\.push\(\[(\d+),"((?:[^"\\]|\\.)*)"\]\)/g;
+              let pm;
+              let rscText = '';
+              while ((pm = pushRe.exec(raceHtml)) !== null) {
+                let unescaped;
+                try { unescaped = JSON.parse('"' + pm[2] + '"'); }
+                catch (e) { unescaped = pm[2].replace(/\\n/g, '\n').replace(/\\\//g, '/'); }
+                rscText += unescaped + '\n';
+              }
+              result.racePage.rscTextLength = rscText.length;
+              result.racePage.rscSample = rscText.substring(0, 3000);
+            }
           }
-
-          for (const rjo of raceJsonObjects) {
-            searchRacePage(rjo.data, rjo.source, 0);
-          }
-
-          raceRunnerArrays.sort((a, b) => b.signalHits - a.signalHits);
-
-          result.racePage = {
-            url: target.href,
-            slug: target.slug,
-            courseId: target.courseId,
-            htmlLength: raceHtml.length,
-            hasNextData: /__NEXT_DATA__/.test(raceHtml),
-            hasRSC: /self\.__next_f/.test(raceHtml),
-            jsonObjectCount: raceJsonObjects.length,
-            runnerArraysFound: raceRunnerArrays.length,
-            // Show top 3 runner arrays with FULL first item data
-            topRunnerArrays: raceRunnerArrays.slice(0, 3).map(ra => ({
-              ...ra,
-              // Truncate sample items to avoid huge response
-              sampleItems: ra.sampleItems.map(item => {
-                const str = JSON.stringify(item);
-                if (str.length > 3000) {
-                  // Show keys and first values
-                  const summary = {};
-                  for (const [k, v] of Object.entries(item)) {
-                    if (typeof v === 'string') summary[k] = v.substring(0, 200);
-                    else if (typeof v === 'number' || typeof v === 'boolean' || v === null) summary[k] = v;
-                    else if (Array.isArray(v)) summary[k] = '[Array(' + v.length + ')]';
-                    else if (typeof v === 'object' && v) summary[k] = '{' + Object.keys(v).join(',') + '}';
-                    else summary[k] = typeof v;
-                  }
-                  return summary;
-                }
-                return item;
-              })
-            }))
-          };
-
-          // Also dump some raw HTML patterns for debugging
-          // Look for data-testid or class patterns that might help
-          const testIds = raceHtml.match(/data-testid="[^"]+"/g) || [];
-          const uniqueTestIds = [...new Set(testIds)].slice(0, 30);
-          result.racePage.testIds = uniqueTestIds;
-
         } else {
-          result.racePage = { error: 'HTTP ' + raceResp.status, url: target.href };
+          result.racePage = { url: target.href, error: 'HTTP ' + raceResp.status };
         }
       } catch (e) {
         result.racePage = { error: e.message };
@@ -356,7 +250,6 @@ export default async function handler(req, res) {
 
     return res.status(200).json(result);
   } catch (err) {
-    result.error = err.message;
-    return res.status(200).json(result);
+    return res.status(200).json({ error: err.message, stack: err.stack });
   }
 }
