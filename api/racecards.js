@@ -2,17 +2,23 @@
  * Smart racecards extraction endpoint.
  * Fetches Racing Post racecards and returns structured JSON.
  *
- * Data lives in __NEXT_DATA__ → props.pageProps.initialState:
- *   - raceCards.meetings[].races[] — race metadata with country, raceTypeCode, etc.
- *   - racePage.data — runner data on individual race pages
+ * Racing Post data structure (verified via debug):
  *
- * Key fields (from Racing Post):
- *   race.country        = "GB" | "IRE" | "USA" | "FR" | …
- *   race.raceTypeCode   = "F" (flat) | "H" (hurdle) | "C" (chase) | …
- *   race.courseStyleName = "Chepstow" (proper-case course name)
- *   race.raceStart       = "14:30" (HH:MM)
- *   race.raceTitle       = full race description
- *   race.raceUrl         = "/racecards/178/curragh/2026-08-09/926227"
+ * INDEX PAGE: __NEXT_DATA__.props.pageProps.initialState.raceCards.meetings[].races[]
+ *   race.country        = "GB" | "IRE" | "USA" | "FR"
+ *   race.raceTypeCode   = "F" (flat) | "H" (hurdle) | "C" (chase)
+ *   race.courseStyleName = "Chepstow" | "Leicester"
+ *   race.raceStart      = "14:30"
+ *   race.raceTitle      = full description
+ *   race.raceUrl        = "/racecards/30/leicester/2026-08-09/924204"
+ *
+ * RACE PAGE: __NEXT_DATA__.props.pageProps.initialState.racePage.data
+ *   .runners[] — array of runner objects:
+ *     horseName, trainerName, trainerRtf (strike rate),
+ *     forecastOddsValue (fractional, decimal = 1 + value),
+ *     formFiguresData (array), nonRunner, startNumber, draw
+ *   .raceDetails.bettingForecast[] — odds per startNumber:
+ *     {oddsDesc: "2/9", oddsValue: 0.222, horses: [1]}
  */
 
 const FETCH_HEADERS = {
@@ -22,260 +28,139 @@ const FETCH_HEADERS = {
   'Accept-Encoding': 'identity'
 };
 
-/* ── Runner extraction from JSON ────────────────── */
+/* ── Parse __NEXT_DATA__ from HTML ──────────────── */
 
-/** Recursively walk object tree to find arrays that look like runners. */
-function findAllRunnerArrays(obj, depth, parentInfo, results) {
-  results = results || [];
-  if (!obj || typeof obj !== 'object') return results;
-  depth = depth || 0;
-  if (depth > 15) return results;
-
-  const ri = gatherRaceInfo(obj);
-  const merged = { ...parentInfo, ...Object.fromEntries(Object.entries(ri).filter(([, v]) => v)) };
-
-  const arrKeys = ['runners','horses','Runners','Horses','cards','entries',
-    'runnersData','horseList','raceRunners','participants','starters','selections',
-    'runners_list','racecard','runnerList'];
-  let foundHere = false;
-  for (const k of arrKeys) {
-    const v = obj[k];
-    if (Array.isArray(v) && v.length >= 2 && v[0] && typeof v[0] === 'object') {
-      if (looksLikeRunners(v)) {
-        results.push({ runners: v, raceInfo: merged });
-        foundHere = true;
-        break;
-      }
-    }
-  }
-
-  if (!foundHere) {
-    for (const k of Object.keys(obj)) {
-      const v = obj[k];
-      if (Array.isArray(v) && v.length >= 2 && v[0] && typeof v[0] === 'object') {
-        if (looksLikeRunners(v)) {
-          results.push({ runners: v, raceInfo: merged });
-          foundHere = true;
-          break;
-        }
-      }
-    }
-  }
-
-  if (foundHere) return results;
-
-  for (const k of Object.keys(obj)) {
-    const v = obj[k];
-    if (Array.isArray(v)) {
-      for (const item of v) {
-        if (item && typeof item === 'object') {
-          findAllRunnerArrays(item, depth + 1, merged, results);
-        }
-      }
-    } else if (v && typeof v === 'object') {
-      findAllRunnerArrays(v, depth + 1, merged, results);
-    }
-  }
-  return results;
+function extractNextData(html) {
+  const m = html.match(/<script\s+id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i);
+  if (!m) return null;
+  try { return JSON.parse(m[1]); } catch (e) { return null; }
 }
 
-function gatherRaceInfo(obj) {
-  const ri = {};
-  if (!obj || typeof obj !== 'object') return ri;
+/* ── Extract runner from Racing Post runner object ── */
 
-  // Course name — Racing Post uses courseStyleName, name, etc.
-  const cKeys = ['courseStyleName','raceCourse','courseName','course','venue',
-    'venueName','meetingName','course_name','meeting'];
-  for (const k of cKeys) {
-    const v = obj[k];
-    if (typeof v === 'string' && v.length > 1) { ri.course = v; break; }
-    if (v && typeof v === 'object') {
-      const n = v.name || v.courseName || v.displayName || v.venueName;
-      if (n) { ri.course = n; break; }
-    }
-  }
+function extractRunner(r, bfMap) {
+  // Skip non-runners
+  if (r.nonRunner) return null;
 
-  // Race time — Racing Post uses raceStart
-  const tKeys = ['raceStart','raceTime','time','offTime','off_time','raceDateTime',
-    'startTime','scheduled_time','race_time','off','postTime'];
-  for (const k of tKeys) {
-    const v = obj[k];
-    if (typeof v === 'string' && v) {
-      const tm = v.match(/(\d{1,2})[:.]\s?(\d{2})/);
-      if (tm) { ri.time = tm[1] + ':' + tm[2]; break; }
-      if (v.length <= 5 && /^\d/.test(v)) { ri.time = v; break; }
-    }
-  }
+  // Horse name
+  const name = r.horseName || r.horseStyleName || '';
+  if (!name) return null;
 
-  // Race title/description
-  const dKeys = ['raceTitle','raceName','title','name','race_name','description',
-    'raceClass','race_title','subtitle','raceType'];
-  for (const k of dKeys) {
-    const v = obj[k];
-    if (typeof v === 'string' && v.length > 3 && v.length < 200) {
-      // Accept race titles (don't require specific keywords — Racing Post titles vary)
-      if (k === 'raceTitle' || k === 'raceName' || k === 'race_title') {
-        ri.desc = v; break;
-      }
-      if (/race|stake|handicap|maiden|novice|class|mile|furlong|nursery|cup|trophy|plate|sprint|[0-9]+[mf]/i.test(v)) {
-        ri.desc = v; break;
-      }
-    }
-  }
-
-  return ri;
-}
-
-function looksLikeRunners(arr) {
-  if (!Array.isArray(arr) || arr.length < 2) return false;
-  let hits = 0;
-  const signals = ['horse','horsename','horsestylename','jockey','jockeyname',
-    'jockeystylename','trainer','trainername','trainerstylename',
-    'form','formfigures','silk','silkurl','saddlecloth','saddleclothnumber',
-    'draw','stall','cloth','odds','rpr','topspeed','officialrating',
-    'horseid','runnerid','uid','age','weight','headgear','weightlbs',
-    'damsire','sire','dam','owner','ownername'];
-  for (let i = 0; i < Math.min(arr.length, 3); i++) {
-    const item = arr[i];
-    if (!item || typeof item !== 'object') return false;
-    const keys = Object.keys(item).map(k => k.toLowerCase());
-    let itemHits = 0;
-    for (const sig of signals) {
-      if (keys.some(k => k.includes(sig))) itemHits++;
-    }
-    if (itemHits >= 2) hits++;
-  }
-  return hits >= 1;
-}
-
-function extractRunner(r) {
-  // Name — Racing Post uses horseStyleName
-  let name = '';
-  const nameKeys = ['horseStyleName','horseName','horse_name','horseFull',
-    'horse','name','runnerName','runner_name','runner','displayName'];
-  for (const k of nameKeys) {
-    const v = r[k];
-    if (typeof v === 'string' && v.length > 1) { name = v; break; }
-    if (v && typeof v === 'object') {
-      name = v.horseStyleName || v.horseName || v.name || v.displayName || '';
-      if (name) break;
-    }
-  }
-
-  // Odds
+  // Odds — Racing Post uses forecastOddsValue (fractional part: 2/9 = 0.222)
+  // Decimal odds = 1 + forecastOddsValue
   let oddsStr = '', oddsDec = null;
-  const oddsKeys = ['odds','bestOdds','best_odds','industryBestOdds','forecastPrice',
-    'forecast_price','spOdds','sp','startingPrice','price','bestOffer',
-    'oddsDecimal','decimalOdds','fractionalOdds','rpOdds','currentOdds','liveOdds'];
-  for (const k of oddsKeys) {
-    const v = r[k];
-    if (!v) continue;
-    if (typeof v === 'number' && v > 1 && v < 200) {
-      oddsDec = v; oddsStr = decToFrac(v); break;
-    }
-    if (typeof v === 'string') {
-      const fd = fracToDec(v);
-      if (fd) { oddsDec = fd; oddsStr = v; break; }
-      const pd = parseFloat(v);
-      if (!isNaN(pd) && pd > 1 && pd < 200) { oddsDec = pd; oddsStr = decToFrac(pd); break; }
-    }
-    if (typeof v === 'object' && v) {
-      const nd = v.decimal || v.dec || v.decimalOdds || v.price || v.decimalPrice;
-      const nf = v.fractional || v.frac || v.fractionalOdds || v.display || v.fractionalPrice;
-      if (typeof nd === 'number' && nd > 1) { oddsDec = nd; oddsStr = nf || decToFrac(nd); break; }
-      if (typeof nf === 'string') { oddsDec = fracToDec(nf); oddsStr = nf; break; }
-      if (v.numerator !== undefined && v.denominator && v.denominator > 0) {
-        oddsDec = (v.numerator / v.denominator) + 1;
-        oddsStr = v.numerator + '/' + v.denominator;
-        break;
-      }
+
+  if (typeof r.forecastOddsValue === 'number' && r.forecastOddsValue > 0) {
+    oddsDec = 1 + r.forecastOddsValue;
+    oddsStr = decToFrac(oddsDec);
+  }
+
+  // Fallback: use bettingForecast map (startNumber → {oddsDesc, oddsValue})
+  if (!oddsDec && bfMap && r.startNumber) {
+    const bf = bfMap[r.startNumber];
+    if (bf) {
+      oddsStr = bf.oddsDesc || '';
+      oddsDec = 1 + (bf.oddsValue || 0);
     }
   }
 
-  // Form — Racing Post uses formFigures
+  // Use the fractional odds string from bettingForecast if available (more readable)
+  if (bfMap && r.startNumber && bfMap[r.startNumber]) {
+    const bfOdds = bfMap[r.startNumber].oddsDesc;
+    if (bfOdds) oddsStr = bfOdds;
+  }
+
+  // Form figures — Racing Post uses formFiguresData (array of form figure objects)
   let form = '';
-  const formKeys = ['formFigures','form','recentForm','form_figures','recent_form',
-    'formFig','formGuide','last_form','raceForm','formString','formWatch',
-    'formatedForm','formattedForm','pastForm','lifetimeForm'];
-  for (const k of formKeys) {
-    const v = r[k];
-    if (typeof v === 'string' && v.length >= 1 && /[0-9FPURSCBO-]/i.test(v)) {
-      if (/^\d{1,3}\/\d{1,3}$/.test(v)) continue; // Skip fractional odds
-      form = v; break;
-    }
-    if (Array.isArray(v)) {
-      form = v.map(f => {
-        if (typeof f === 'object' && f) return f.position || f.pos || f.finishPosition || '';
-        return String(f);
-      }).join('');
-      if (form) break;
-    }
-    if (v && typeof v === 'object') {
-      form = v.figures || v.form || v.recent || v.flat || v.last6 || '';
-      if (form) break;
+  if (Array.isArray(r.formFiguresData)) {
+    form = r.formFiguresData.map(function(f) {
+      if (typeof f === 'string') return f;
+      if (typeof f === 'number') return f >= 10 ? '0' : String(f);
+      if (f && typeof f === 'object') {
+        // Could be {character: "2"} or {position: 2} or {char: "2"} etc.
+        const ch = f.character || f.char || f.figure || f.formChar;
+        if (ch) return ch;
+        const pos = f.position || f.pos || f.finishPosition;
+        if (pos !== undefined) return pos >= 10 ? '0' : String(pos);
+        return '';
+      }
+      return '';
+    }).join('');
+  } else if (typeof r.formFiguresData === 'string') {
+    // Might be a JSON string
+    try {
+      const parsed = JSON.parse(r.formFiguresData);
+      if (Array.isArray(parsed)) {
+        form = parsed.map(function(f) {
+          if (typeof f === 'string') return f;
+          if (typeof f === 'number') return f >= 10 ? '0' : String(f);
+          if (f && typeof f === 'object') {
+            return f.character || f.char || f.figure || '';
+          }
+          return '';
+        }).join('');
+      } else {
+        form = r.formFiguresData;
+      }
+    } catch (e) {
+      form = r.formFiguresData;
     }
   }
-
-  // Trainer — Racing Post uses trainerStyleName
-  let trainer = '', trainerPct = null;
-  const trainerKeys = ['trainerStyleName','trainerName','trainer_name','trainer',
-    'trainerFull','jockeyTrainer'];
-  for (const k of trainerKeys) {
-    const v = r[k];
-    if (typeof v === 'string' && v.length > 1) { trainer = v; break; }
-    if (v && typeof v === 'object') {
-      trainer = v.trainerStyleName || v.name || v.trainerName || v.styleName || v.displayName || '';
-      if (v.percent !== undefined) trainerPct = parseFloat(v.percent);
-      if (v.strikeRate !== undefined) trainerPct = parseFloat(v.strikeRate);
-      if (v.winPercent !== undefined) trainerPct = parseFloat(v.winPercent);
-      if (v.last14Days && v.last14Days.runs > 0) {
-        trainerPct = Math.round((v.last14Days.wins / v.last14Days.runs) * 100);
-      }
-      if (v.stats) {
-        if (v.stats.percent !== undefined) trainerPct = parseFloat(v.stats.percent);
-        if (v.stats.wins !== undefined && v.stats.runs > 0) {
-          trainerPct = Math.round((v.stats.wins / v.stats.runs) * 100);
-        }
-      }
-      if (trainer) break;
-    }
-  }
-
-  // Trainer strike rate from separate fields
-  if (trainerPct === null) {
-    const tsrKeys = ['trainerStrikeRate','trainer_strike_rate','trainerPercent',
-      'trainerWinRate','trainerWinPercent','trainerSr','trainerLast14',
-      'trainerLast14Days','trainerForm','trainerStats','trainerRecord'];
-    for (const k of tsrKeys) {
+  // Fallback: check other form field names
+  if (!form) {
+    const fallbackFormKeys = ['formFigures', 'form', 'recentForm'];
+    for (const k of fallbackFormKeys) {
       const v = r[k];
-      if (v === undefined || v === null) continue;
-      if (typeof v === 'number') { trainerPct = v; break; }
-      if (typeof v === 'string') { trainerPct = parseFloat(v); break; }
-      if (typeof v === 'object' && v.runs > 0 && v.wins !== undefined) {
-        trainerPct = Math.round((v.wins / v.runs) * 100); break;
+      if (typeof v === 'string' && v.length >= 1 && /[0-9FPURSCBO-]/i.test(v)) {
+        if (!/^\d{1,3}\/\d{1,3}$/.test(v)) { form = v; break; }
       }
     }
   }
-  // Extract % from trainer name string
-  if (trainerPct === null && typeof trainer === 'string') {
-    const pctM = trainer.match(/(\d{1,3})%/);
-    if (pctM) trainerPct = parseInt(pctM[1]);
+
+  // Trainer — Racing Post uses trainerName
+  const trainer = r.trainerName || r.trainerStyleName || '';
+
+  // Trainer strike rate — Racing Post uses trainerRtf
+  let trainerPct = null;
+  if (typeof r.trainerRtf === 'number') {
+    trainerPct = r.trainerRtf;
+  } else if (typeof r.trainerRtf === 'string') {
+    trainerPct = parseFloat(r.trainerRtf);
   }
 
-  return { name, form, odds: oddsStr, oddsDecimal: oddsDec, trainer, trainerPct };
+  return {
+    name,
+    form,
+    odds: oddsStr,
+    oddsDecimal: oddsDec,
+    trainer,
+    trainerPct: trainerPct !== null && !isNaN(trainerPct) ? trainerPct : null
+  };
 }
+
+/* ── Odds conversion helpers ────────────────────── */
 
 function decToFrac(d) {
   if (!d || d <= 1) return 'EVS';
   const n = d - 1;
-  const tbl = [[1,5],[1,4],[1,3],[2,5],[1,2],[4,7],[8,13],[4,6],[8,11],[4,5],[5,6],
-    [10,11],[1,1],[6,5],[5,4],[11,8],[6,4],[13,8],[7,4],[2,1],[9,4],[5,2],
-    [11,4],[3,1],[7,2],[4,1],[9,2],[5,1],[6,1],[7,1],[8,1]];
+  // Common fractional odds lookup
+  const tbl = [
+    [1,6],[1,5],[1,4],[2,7],[1,3],[4,11],[2,5],[4,9],[1,2],[8,15],
+    [4,7],[8,13],[4,6],[8,11],[4,5],[5,6],[10,11],
+    [1,1],[6,5],[5,4],[11,8],[6,4],[13,8],[7,4],[15,8],
+    [2,1],[9,4],[5,2],[11,4],[3,1],[10,3],[7,2],[4,1],
+    [9,2],[5,1],[11,2],[6,1],[13,2],[7,1],[15,2],[8,1],
+    [17,2],[9,1],[10,1],[11,1],[12,1],[14,1],[16,1],[20,1],
+    [25,1],[28,1],[33,1],[40,1],[50,1],[66,1],[80,1],[100,1]
+  ];
   let best = null, bd = 99;
   for (const f of tbl) {
     const diff = Math.abs(f[0] / f[1] - n);
     if (diff < bd) { bd = diff; best = f; }
   }
+  // Only use the lookup if it's a close match
+  if (best && bd < 0.05) return best[0] + '/' + best[1];
+  // Otherwise compute nearest common fraction
   return best ? best[0] + '/' + best[1] : d.toFixed(1);
 }
 
@@ -285,14 +170,6 @@ function fracToDec(s) {
   const m = s.match(/(\d+)\/(\d+)/);
   if (!m) return null;
   return (+m[1] / +m[2]) + 1;
-}
-
-/* ── Extract __NEXT_DATA__ from HTML ──────────────── */
-
-function extractNextData(html) {
-  const m = html.match(/<script\s+id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i);
-  if (!m) return null;
-  try { return JSON.parse(m[1]); } catch (e) { return null; }
 }
 
 /* ── Main handler ───────────────────────────────── */
@@ -310,37 +187,29 @@ export default async function handler(req, res) {
   try {
     // ── Step 1: Fetch the racecards index page ──
     const indexResp = await fetch('https://www.racingpost.com/racecards/', {
-      headers: FETCH_HEADERS,
-      redirect: 'follow'
+      headers: FETCH_HEADERS, redirect: 'follow'
     });
 
     if (!indexResp.ok) {
-      return res.status(502).json({
-        error: 'Racing Post returned HTTP ' + indexResp.status, debug
-      });
+      return res.status(502).json({ error: 'Racing Post HTTP ' + indexResp.status, debug });
     }
 
     const html = await indexResp.text();
     debug.push({ step: 'fetched_index', htmlLength: html.length, elapsed: Date.now() - startTime });
 
-    // ── Step 2: Parse __NEXT_DATA__ for structured race list ──
+    // ── Step 2: Parse __NEXT_DATA__ ──
     const nextData = extractNextData(html);
     if (!nextData) {
-      return res.status(200).json({
-        races: [], method: 'none', error: 'No __NEXT_DATA__ found on racecards page', debug
-      });
+      return res.status(200).json({ races: [], method: 'none', error: 'No __NEXT_DATA__', debug });
     }
 
     const initialState = nextData.props?.pageProps?.initialState || {};
     const meetings = initialState.raceCards?.meetings || [];
 
-    // ── Step 3: Filter to GB flat races using Racing Post's own fields ──
+    // ── Step 3: Filter to GB flat races ──
     const gbFlatRaces = [];
     for (const meeting of meetings) {
-      const races = meeting.races || [];
-      for (const race of races) {
-        // country = "GB" for Great Britain (not IRE, USA, FR, etc.)
-        // raceTypeCode = "F" for Flat (not "H" hurdle, "C" chase, etc.)
+      for (const race of (meeting.races || [])) {
         if (race.country === 'GB' && race.raceTypeCode === 'F') {
           gbFlatRaces.push({
             raceId: race.raceId,
@@ -350,8 +219,7 @@ export default async function handler(req, res) {
             url: race.raceUrl || '',
             distance: race.displayDistance || '',
             raceClass: race.raceClass || '',
-            numberOfRunners: race.numberOfRunners || 0,
-            meetingId: race.meetingId
+            numberOfRunners: race.numberOfRunners || 0
           });
         }
       }
@@ -360,18 +228,15 @@ export default async function handler(req, res) {
     debug.push({
       step: 'filtered_gb_flat',
       totalMeetings: meetings.length,
-      totalRaces: meetings.reduce((s, m) => s + (m.races?.length || 0), 0),
       gbFlatRaces: gbFlatRaces.length,
       courses: [...new Set(gbFlatRaces.map(r => r.course))],
-      allCountries: [...new Set(meetings.flatMap(m => (m.races || []).map(r => r.country)))],
       elapsed: Date.now() - startTime
     });
 
     if (!gbFlatRaces.length) {
       return res.status(200).json({
         races: [], method: 'none',
-        error: 'No GB flat races found today. Countries: ' +
-          [...new Set(meetings.flatMap(m => (m.races || []).map(r => r.country)))].join(', '),
+        error: 'No GB flat races found today',
         debug
       });
     }
@@ -379,8 +244,7 @@ export default async function handler(req, res) {
     // ── Step 4: Fetch individual race pages for runner data ──
     const races = [];
     const BATCH_SIZE = 6;
-    const MAX_RACES = 30;
-    const toFetch = gbFlatRaces.slice(0, MAX_RACES);
+    const toFetch = gbFlatRaces.slice(0, 30);
 
     for (let i = 0; i < toFetch.length; i += BATCH_SIZE) {
       if (Date.now() - startTime > 8000) {
@@ -398,8 +262,7 @@ export default async function handler(req, res) {
               signal: AbortSignal.timeout(4000)
             });
             if (!resp.ok) return null;
-            const raceHtml = await resp.text();
-            return { race, html: raceHtml };
+            return { race, html: await resp.text() };
           } catch (e) {
             return null;
           }
@@ -410,61 +273,36 @@ export default async function handler(req, res) {
         if (result.status !== 'fulfilled' || !result.value) continue;
         const { race, html: raceHtml } = result.value;
 
-        // Parse race page __NEXT_DATA__
         const raceNextData = extractNextData(raceHtml);
         let horses = [];
 
         if (raceNextData) {
-          // Search for runner arrays in the race page data
-          const found = findAllRunnerArrays(raceNextData);
+          // Direct access to runner data at the known path
+          const racePageData = raceNextData.props?.pageProps?.initialState?.racePage?.data;
 
-          // Use the largest runner array
-          let bestRunners = null;
-          for (const { runners, raceInfo } of found) {
-            if (!bestRunners || runners.length > bestRunners.length) {
-              bestRunners = runners;
-            }
-          }
-
-          if (bestRunners) {
-            horses = bestRunners.map(r => extractRunner(r)).filter(h => h.name);
-          }
-        }
-
-        // If __NEXT_DATA__ didn't yield runners, try fallback extraction
-        if (!horses.length) {
-          // Try RSC payloads
-          const pushRe = /self\.__next_f\.push\(\[(\d+),"((?:[^"\\]|\\.)*)"\]\)/g;
-          let pm;
-          let rscText = '';
-          while ((pm = pushRe.exec(raceHtml)) !== null) {
-            let unescaped;
-            try { unescaped = JSON.parse('"' + pm[2] + '"'); }
-            catch (e) { unescaped = pm[2].replace(/\\n/g, '\n').replace(/\\\//g, '/'); }
-            rscText += unescaped + '\n';
-          }
-
-          if (rscText.length > 100) {
-            // Parse RSC lines for JSON objects
-            const rscObjects = [];
-            for (const line of rscText.split('\n')) {
-              const trimmed = line.trim();
-              if (!trimmed) continue;
-              const colonIdx = trimmed.indexOf(':');
-              if (colonIdx < 0 || colonIdx > 6) continue;
-              const prefix = trimmed.substring(0, colonIdx);
-              if (!/^[\da-fA-F]+$/.test(prefix)) continue;
-              const data = trimmed.substring(colonIdx + 1);
-              if (data.length > 2 && (data[0] === '{' || data[0] === '[')) {
-                try { rscObjects.push(JSON.parse(data)); } catch (e) {}
+          if (racePageData && Array.isArray(racePageData.runners)) {
+            // Build betting forecast map: startNumber → {oddsDesc, oddsValue}
+            const bfMap = {};
+            const bettingForecast = racePageData.raceDetails?.bettingForecast || [];
+            for (const bf of bettingForecast) {
+              const bfHorses = bf.horses || [];
+              for (const startNum of bfHorses) {
+                bfMap[startNum] = { oddsDesc: bf.oddsDesc, oddsValue: bf.oddsValue };
               }
             }
 
-            for (const obj of rscObjects) {
-              const found = findAllRunnerArrays(obj);
-              for (const { runners } of found) {
-                const extracted = runners.map(r => extractRunner(r)).filter(h => h.name);
-                if (extracted.length > horses.length) horses = extracted;
+            horses = racePageData.runners
+              .map(r => extractRunner(r, bfMap))
+              .filter(h => h !== null && h.name);
+
+            // Update course/time from race page data if available
+            if (racePageData.race) {
+              if (racePageData.race.diffusionCourseName) {
+                race.course = racePageData.race.diffusionCourseName;
+              }
+              if (racePageData.race.raceTime) {
+                const tm = racePageData.race.raceTime.match(/(\d{1,2})[:.]\s?(\d{2})/);
+                if (tm) race.time = tm[1] + ':' + tm[2];
               }
             }
           }
@@ -479,35 +317,31 @@ export default async function handler(req, res) {
           horses
         });
 
-        // Debug: if no horses found, log for diagnostics
         if (!horses.length) {
           debug.push({
-            step: 'no_runners_found',
+            step: 'no_runners',
             race: race.course + ' ' + race.time,
             url: race.url,
-            hasNextData: raceHtml ? /__NEXT_DATA__/.test(raceHtml) : false,
-            hasRSC: raceHtml ? /self\.__next_f/.test(raceHtml) : false
+            hasNextData: !!raceNextData,
+            hasRacePageData: !!(raceNextData?.props?.pageProps?.initialState?.racePage?.data)
           });
         }
       }
     }
 
-    debug.push({
-      step: 'fetch_complete',
-      totalRaces: races.length,
-      racesWithRunners: races.filter(r => r.horses.length > 0).length,
-      elapsed: Date.now() - startTime
-    });
-
     // Sort by time
     races.sort((a, b) => (a.time || '99:99').localeCompare(b.time || '99:99'));
 
-    res.setHeader('Cache-Control', 'public, max-age=120');
-    return res.status(200).json({
-      races,
-      method: 'structured',
-      debug
+    debug.push({
+      step: 'complete',
+      totalRaces: races.length,
+      racesWithRunners: races.filter(r => r.horses.length > 0).length,
+      totalHorses: races.reduce((s, r) => s + r.horses.length, 0),
+      elapsed: Date.now() - startTime
     });
+
+    res.setHeader('Cache-Control', 'public, max-age=120');
+    return res.status(200).json({ races, method: 'structured', debug });
 
   } catch (err) {
     debug.push({ step: 'error', message: err.message, stack: err.stack });
