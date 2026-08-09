@@ -55,9 +55,9 @@ function extractRunner(r, bfMap) {
     oddsStr = decToFrac(oddsDec);
   }
 
-  // Fallback: use bettingForecast map (startNumber → {oddsDesc, oddsValue})
-  if (!oddsDec && bfMap && r.startNumber) {
-    const bf = bfMap[r.startNumber];
+  // Fallback: use bettingForecast map (horseId → {oddsDesc, oddsValue})
+  if (!oddsDec && bfMap && r.horseId) {
+    const bf = bfMap[r.horseId];
     if (bf) {
       oddsStr = bf.oddsDesc || '';
       oddsDec = 1 + (bf.oddsValue || 0);
@@ -65,8 +65,8 @@ function extractRunner(r, bfMap) {
   }
 
   // Use the fractional odds string from bettingForecast if available (more readable)
-  if (bfMap && r.startNumber && bfMap[r.startNumber]) {
-    const bfOdds = bfMap[r.startNumber].oddsDesc;
+  if (bfMap && r.horseId && bfMap[r.horseId]) {
+    const bfOdds = bfMap[r.horseId].oddsDesc;
     if (bfOdds) oddsStr = bfOdds;
   }
 
@@ -120,12 +120,14 @@ function extractRunner(r, bfMap) {
   // Trainer — Racing Post uses trainerName
   const trainer = r.trainerName || r.trainerStyleName || '';
 
-  // Trainer strike rate — Racing Post uses trainerRtf
-  let trainerPct = null;
+  // Trainer RTF (Ready To Fire) — NOT a win strike rate.
+  // RTF is a Racing Post proprietary metric (0-100 scale).
+  // Higher = better readiness. No actual win % available in this data.
+  let trainerRtf = null;
   if (typeof r.trainerRtf === 'number') {
-    trainerPct = r.trainerRtf;
+    trainerRtf = r.trainerRtf;
   } else if (typeof r.trainerRtf === 'string') {
-    trainerPct = parseFloat(r.trainerRtf);
+    trainerRtf = parseFloat(r.trainerRtf);
   }
 
   return {
@@ -134,7 +136,8 @@ function extractRunner(r, bfMap) {
     odds: oddsStr,
     oddsDecimal: oddsDec,
     trainer,
-    trainerPct: trainerPct !== null && !isNaN(trainerPct) ? trainerPct : null
+    trainerPct: null,  // No actual win % available from Racing Post
+    trainerRtf: trainerRtf !== null && !isNaN(trainerRtf) ? trainerRtf : null
   };
 }
 
@@ -281,13 +284,15 @@ export default async function handler(req, res) {
           const racePageData = raceNextData.props?.pageProps?.initialState?.racePage?.data;
 
           if (racePageData && Array.isArray(racePageData.runners)) {
-            // Build betting forecast map: startNumber → {oddsDesc, oddsValue}
+            // Build betting forecast map: horseId → {oddsDesc, oddsValue}
+            // horses[] contains objects: {horseId, horseName, horseUrl}
             const bfMap = {};
             const bettingForecast = racePageData.raceDetails?.bettingForecast || [];
             for (const bf of bettingForecast) {
               const bfHorses = bf.horses || [];
-              for (const startNum of bfHorses) {
-                bfMap[startNum] = { oddsDesc: bf.oddsDesc, oddsValue: bf.oddsValue };
+              for (const h of bfHorses) {
+                const id = typeof h === 'object' ? h.horseId : h;
+                if (id) bfMap[id] = { oddsDesc: bf.oddsDesc, oddsValue: bf.oddsValue };
               }
             }
 

@@ -231,7 +231,7 @@
   <div class="method">
     <div class="method-cell">
       <h4>Trainer (0–40)</h4>
-      <p>Auto-filled when available, or type manually. &lt;5% scores 40, &gt;20% scores 0. Unknown defaults to 25.</p>
+      <p>Uses Racing Post RTF (Ready&nbsp;To&nbsp;Fire, 0–100). Low RTF = poor readiness = more lay pts. Or enter a win&nbsp;% manually.</p>
     </div>
     <div class="method-cell">
       <h4>Form (0–40)</h4>
@@ -328,12 +328,22 @@ function scoreTrainerPct(pct){
   var p=parseFloat(pct);if(isNaN(p))return 25;
   return Math.max(0,Math.min(40,Math.round(40-p*2)));
 }
+/* RTF (Ready To Fire) is Racing Post's 0-100 metric.
+   Higher RTF = better trainer readiness = less lay-worthy.
+   Scale: RTF 0→40 pts, RTF 50→20 pts, RTF 100→0 pts */
+function scoreTrainerRtf(rtf){
+  if(rtf===null||rtf===undefined||rtf==='')return 25;
+  var r=parseFloat(rtf);if(isNaN(r))return 25;
+  return Math.max(0,Math.min(40,Math.round(40*(1-r/100))));
+}
 function scoreOdds(d){
   if(!d||d<=1)return 10;
   return Math.max(0,Math.min(20,Math.round(20*(1-(d-1)/8))));
 }
-function layScore(formStr,trainerPct,odds){
-  var f=scoreForm(formStr),t=scoreTrainerPct(trainerPct),o=scoreOdds(odds);
+function layScore(formStr,trainerVal,odds,isRtf){
+  var f=scoreForm(formStr);
+  var t=isRtf?scoreTrainerRtf(trainerVal):scoreTrainerPct(trainerVal);
+  var o=scoreOdds(odds);
   return{total:f+t+o,f:f,t:t,o:o};
 }
 function layRating(total){
@@ -1409,30 +1419,40 @@ function renderHorses(results){
 
     var rows=qualified.map(function(h,idx){
       var rid='r'+raceCount+'_'+idx;
-      var sc=layScore(h.form,h.trainerPct,h.oddsDecimal);
+      /* Determine trainer value: prefer trainerPct (win %), fall back to trainerRtf */
+      var hasRtf=h.trainerRtf!==null&&h.trainerRtf!==undefined;
+      var hasPct=h.trainerPct!==null&&h.trainerPct!==undefined;
+      var trainerVal=hasPct?h.trainerPct:(hasRtf?h.trainerRtf:null);
+      var isRtf=!hasPct&&hasRtf;
+      var sc=layScore(h.form,trainerVal,h.oddsDecimal,isRtf);
       var rating=layRating(sc.total);
       var frac=h.odds||decToFrac(h.oddsDecimal);
       var dec=h.oddsDecimal?h.oddsDecimal.toFixed(2):'';
+      var tsrDisplay=hasPct?''+h.trainerPct:(hasRtf?''+h.trainerRtf:'');
 
       allRunnerData.push({
         id:rid,horse:h.name||'Horse '+(idx+1),odds:h.oddsDecimal,frac:frac,
-        form:h.form,tsr:h.trainerPct!==null?''+h.trainerPct:'',
+        form:h.form,tsr:tsrDisplay,isRtf:isRtf,
         course:course,time:time,desc:desc,lastScore:sc,lastRating:rating
       });
       totalQual++;
+
+      var tsrLabel=isRtf?'RTF (0–100)':'Win %';
+      var tsrPlaceholder=isRtf?'RTF':'e.g. 5';
+      var tsrFilled=tsrDisplay!=='';
 
       return'<tr id="row_'+rid+'">'
         +'<td><div class="horse-name">'+esc(h.name||'Horse '+(idx+1))+'</div>'
         +(h.trainer?'<div class="form-hint">'+esc(h.trainer)+'</div>':'')+'</td>'
         +'<td><input class="inline-input'+(h.form?' filled':'')+'" id="form_'+rid+'" value="'+esc(h.form)+'" placeholder="e.g. 060800" oninput="recalc(\''+rid+'\')" maxlength="14"><div class="form-hint">Edit form</div></td>'
         +'<td><span class="odds">'+esc(frac)+'<span class="dec">'+dec+'</span></span></td>'
-        +'<td><input class="inline-input'+(h.trainerPct!==null?' filled':'')+'" id="tsr_'+rid+'" value="'+(h.trainerPct!==null?h.trainerPct:'')+'" placeholder="e.g. 5" oninput="recalc(\''+rid+'\')" maxlength="4" style="width:52px"><div class="form-hint">Win %</div></td>'
+        +'<td><input class="inline-input'+(tsrFilled?' filled':'')+'" id="tsr_'+rid+'" value="'+esc(tsrDisplay)+'" placeholder="'+tsrPlaceholder+'" oninput="recalc(\''+rid+'\')" maxlength="4" style="width:52px"><div class="form-hint">'+tsrLabel+'</div></td>'
         +'<td><div class="score-cell has-tip" data-tip="T:'+sc.t+' F:'+sc.f+' O:'+sc.o+'" id="score_'+rid+'"><span class="score-num">'+sc.total+'</span><div class="score-track"><div class="score-fill" style="width:'+sc.total+'%"></div></div></div></td>'
         +'<td><span class="badge '+rating.cls+'" id="badge_'+rid+'">'+rating.label+'</span></td>'
         +'</tr>';
     }).join('');
 
-    racesHTML+='<div class="race open"><div class="race-head" onclick="this.parentElement.classList.toggle(\'open\')"><div class="race-title"><span class="time">'+esc(time)+'</span>'+esc(course)+'</div><div class="race-tags">'+tags+'<span class="chevron"></span></div></div><div class="race-body"><div class="tbl-wrap"><table><thead><tr><th>Horse</th><th>Form</th><th>Best Odds</th><th>Trainer SR</th><th>Lay Score</th><th>Rating</th></tr></thead><tbody>'+rows+'</tbody></table></div></div></div>';
+    racesHTML+='<div class="race open"><div class="race-head" onclick="this.parentElement.classList.toggle(\'open\')"><div class="race-title"><span class="time">'+esc(time)+'</span>'+esc(course)+'</div><div class="race-tags">'+tags+'<span class="chevron"></span></div></div><div class="race-body"><div class="tbl-wrap"><table><thead><tr><th>Horse</th><th>Form</th><th>Best Odds</th><th>Trainer</th><th>Lay Score</th><th>Rating</th></tr></thead><tbody>'+rows+'</tbody></table></div></div></div>';
     raceCount++;
   });
 
@@ -1442,7 +1462,9 @@ function renderHorses(results){
 
   var formCount=allRunnerData.filter(function(r){return r.form}).length;
   var tsrCount=allRunnerData.filter(function(r){return r.tsr}).length;
-  msg('Loaded '+raceCount+' races, '+totalQual+' runners at ≤ 8/1. '+formCount+' form and '+tsrCount+' trainer stats auto-filled. Edit any field to adjust scores.','ok');
+  var rtfCount=allRunnerData.filter(function(r){return r.isRtf&&r.tsr}).length;
+  var tsrMsg=tsrCount?tsrCount+' trainer RTF'+(rtfCount===tsrCount?' (Ready To Fire)':' stats'):'0 trainer stats';
+  msg('Loaded '+raceCount+' races, '+totalQual+' runners at ≤ 8/1. '+formCount+' form and '+tsrMsg+' auto-filled. Edit any field to adjust scores.','ok');
   document.getElementById('parseStatus').textContent=raceCount+' races, '+totalQual+' runners';
 }
 
@@ -1458,7 +1480,7 @@ function recalc(rid){
   var tsrVal=tsrEl?tsrEl.value.trim():'';
   if(formEl)formEl.classList.toggle('filled',formVal.length>0);
   if(tsrEl)tsrEl.classList.toggle('filled',tsrVal.length>0);
-  var sc=layScore(formVal,tsrVal||null,runner.odds);
+  var sc=layScore(formVal,tsrVal||null,runner.odds,runner.isRtf);
   var rating=layRating(sc.total);
   var scoreEl=document.getElementById('score_'+rid);
   if(scoreEl){
@@ -1487,7 +1509,7 @@ function rebuildSummary(){
       +'<td style="font-size:12px">'+esc(r.time)+' '+esc(r.course)+'</td>'
       +'<td><span class="odds">'+esc(r.frac)+'</span></td>'
       +'<td><span class="form">'+renderFormHTML(r.form||'')+'</span></td>'
-      +'<td style="font-family:var(--mono);font-size:12px">'+(r.tsr||'—')+'%</td>'
+      +'<td style="font-family:var(--mono);font-size:12px">'+(r.tsr||'—')+(r.isRtf?' RTF':'%')+'</td>'
       +'<td style="font-family:var(--mono);font-weight:700;font-size:15px">'+r.lastScore.total+'</td>'
       +'<td><span class="badge '+r.lastRating.cls+'">'+r.lastRating.label+'</span></td>'
       +'</tr>';
