@@ -1,6 +1,7 @@
 /**
- * Debug endpoint v2: drills into __NEXT_DATA__.props.pageProps.initialState
- * to find actual race/runner data structure from Racing Post.
+ * Debug v3: Focus on the RACE PAGE data structure.
+ * We know the index page works — now we need to see
+ * what a race page's __NEXT_DATA__ contains for runners.
  */
 
 const FETCH_HEADERS = {
@@ -10,246 +11,200 @@ const FETCH_HEADERS = {
   'Accept-Encoding': 'identity'
 };
 
-/**
- * Recursively find arrays that look like runner/horse data.
- * Returns path + sample items so we can see real field names.
- */
-function findInterestingArrays(obj, path, depth, results) {
-  if (!obj || typeof obj !== 'object' || depth > 12) return;
-  results = results || [];
-
-  if (Array.isArray(obj)) {
-    if (obj.length >= 2 && obj[0] && typeof obj[0] === 'object' && !Array.isArray(obj[0])) {
-      const keys = Object.keys(obj[0]);
-      const keyStr = keys.join(',').toLowerCase();
-      // Check for runner-like, race-like, or meeting-like arrays
-      const runnerSignals = ['horse','name','runner','jockey','trainer','form','odds','silk',
-        'draw','cloth','number','uid','id','price','age','weight','rating'];
-      const raceSignals = ['race','time','off','runners','distance','class','going','prize'];
-      const meetingSignals = ['meeting','course','venue','races','country','region'];
-
-      let runnerHits = 0, raceHits = 0, meetingHits = 0;
-      for (const s of runnerSignals) { if (keyStr.includes(s)) runnerHits++; }
-      for (const s of raceSignals) { if (keyStr.includes(s)) raceHits++; }
-      for (const s of meetingSignals) { if (keyStr.includes(s)) meetingHits++; }
-
-      if (runnerHits >= 2 || raceHits >= 2 || meetingHits >= 2 || keys.length >= 5) {
-        // Summarize each item: show keys + values (truncated)
-        const summarize = (item) => {
-          const summary = {};
-          for (const [k, v] of Object.entries(item)) {
-            if (v === null || v === undefined) summary[k] = null;
-            else if (typeof v === 'string') summary[k] = v.length > 150 ? v.substring(0, 150) + '...' : v;
-            else if (typeof v === 'number' || typeof v === 'boolean') summary[k] = v;
-            else if (Array.isArray(v)) summary[k] = `[Array(${v.length})]`;
-            else if (typeof v === 'object') summary[k] = `{${Object.keys(v).slice(0, 8).join(',')}}`;
-          }
-          return summary;
-        };
-
-        results.push({
-          path,
-          arrayLength: obj.length,
-          signals: { runner: runnerHits, race: raceHits, meeting: meetingHits },
-          firstItemKeys: keys,
-          sample: obj.slice(0, 2).map(summarize)
-        });
-      }
-    }
-    // Search inside array items
-    for (let i = 0; i < Math.min(obj.length, 5); i++) {
-      if (obj[i] && typeof obj[i] === 'object') {
-        findInterestingArrays(obj[i], path + '[' + i + ']', depth + 1, results);
-      }
-    }
-  } else {
-    for (const k of Object.keys(obj)) {
-      if (obj[k] && typeof obj[k] === 'object') {
-        findInterestingArrays(obj[k], path + '.' + k, depth + 1, results);
-      }
-    }
-  }
-  return results;
-}
-
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache');
 
-  const result = { timestamp: new Date().toISOString() };
+  const result = {};
 
   try {
-    // ── Part A: Inspect the racecards INDEX page ──
+    // Step 1: Get index to find a GB flat race URL
     const indexResp = await fetch('https://www.racingpost.com/racecards/', {
       headers: FETCH_HEADERS, redirect: 'follow'
     });
-    if (!indexResp.ok) {
-      return res.status(200).json({ error: 'HTTP ' + indexResp.status });
-    }
     const html = await indexResp.text();
-
-    // Parse __NEXT_DATA__
     const ndm = html.match(/<script\s+id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i);
-    if (!ndm) {
-      return res.status(200).json({ error: 'No __NEXT_DATA__ found', htmlLength: html.length });
-    }
+    if (!ndm) return res.status(200).json({ error: 'No __NEXT_DATA__ on index' });
 
     const nextData = JSON.parse(ndm[1]);
-    const pageProps = nextData.props?.pageProps || {};
-    const initialState = pageProps.initialState || {};
+    const meetings = nextData.props?.pageProps?.initialState?.raceCards?.meetings || [];
 
-    result.indexPage = {
-      nextDataTopKeys: Object.keys(nextData),
-      pagePropsKeys: Object.keys(pageProps),
-      initialStateKeys: Object.keys(initialState)
-    };
-
-    // Drill into initialState — show keys at each level
-    for (const [k, v] of Object.entries(initialState)) {
-      if (v && typeof v === 'object' && !Array.isArray(v)) {
-        result.indexPage['initialState.' + k + '.keys'] = Object.keys(v).slice(0, 20);
-      } else if (Array.isArray(v)) {
-        result.indexPage['initialState.' + k] = `[Array(${v.length})]`;
-        if (v.length > 0 && v[0] && typeof v[0] === 'object') {
-          result.indexPage['initialState.' + k + '[0].keys'] = Object.keys(v[0]).slice(0, 30);
+    // Find first GB flat race
+    let targetRace = null;
+    for (const m of meetings) {
+      for (const r of (m.races || [])) {
+        if (r.country === 'GB' && r.raceTypeCode === 'F') {
+          targetRace = r;
+          break;
         }
       }
+      if (targetRace) break;
     }
 
-    // Find all interesting arrays in the __NEXT_DATA__
-    const indexArrays = findInterestingArrays(nextData, 'nextData', 0);
-    // Sort by total signals
-    indexArrays.sort((a, b) => (b.signals.runner + b.signals.race + b.signals.meeting) - (a.signals.runner + a.signals.race + a.signals.meeting));
-    result.indexPage.interestingArrays = indexArrays.slice(0, 10);
+    if (!targetRace) return res.status(200).json({ error: 'No GB flat races found' });
 
-    // Find race URLs in the HTML
-    const clean = html.replace(/\\+\//g, '/');
-    const urlRe = /\/racecards\/(\d+)\/([a-z][a-z0-9-]+)\/(\d{4}-\d{2}-\d{2})\/(\d+)/gi;
-    const urls = [];
-    const seenUrls = new Set();
-    let um;
-    while ((um = urlRe.exec(clean)) !== null) {
-      if (!seenUrls.has(um[0])) {
-        seenUrls.add(um[0]);
-        urls.push({ href: um[0], courseId: um[1], slug: um[2], date: um[3], raceId: um[4] });
-      }
-    }
-
-    const slugGroups = {};
-    for (const u of urls) {
-      if (!slugGroups[u.slug]) slugGroups[u.slug] = [];
-      slugGroups[u.slug].push(u.courseId);
-    }
-    result.indexPage.raceUrls = {
-      total: urls.length,
-      slugGroups: Object.fromEntries(
-        Object.entries(slugGroups).map(([slug, ids]) => [slug, { count: ids.length, courseIds: [...new Set(ids)] }])
-      ),
-      sampleUrls: urls.slice(0, 5)
+    result.targetRace = {
+      course: targetRace.courseStyleName,
+      time: targetRace.raceStart,
+      title: targetRace.raceTitle,
+      url: targetRace.raceUrl,
+      runners: targetRace.numberOfRunners
     };
 
-    // ── Part B: Fetch ONE individual race page and inspect it ──
-    const ukSlugs = new Set(['ascot','ayr','bath','beverley','brighton','carlisle',
-      'catterick','catterick-bridge','chelmsford','chelmsford-city','chepstow','chester',
-      'doncaster','epsom','epsom-downs','ffos-las','goodwood','great-yarmouth','yarmouth',
-      'hamilton','hamilton-park','haydock','haydock-park','kempton','kempton-park',
-      'leicester','lingfield','lingfield-park','musselburgh','newbury','newcastle',
-      'newmarket','nottingham','pontefract','redcar','ripon','salisbury','sandown',
-      'sandown-park','southwell','thirsk','wetherby','windsor','wolverhampton','york']);
+    // Step 2: Fetch the race page
+    const raceResp = await fetch('https://www.racingpost.com' + targetRace.raceUrl, {
+      headers: FETCH_HEADERS, redirect: 'follow',
+      signal: AbortSignal.timeout(8000)
+    });
 
-    const target = urls.find(u => ukSlugs.has(u.slug)) || urls[0];
+    if (!raceResp.ok) {
+      return res.status(200).json({ ...result, error: 'Race page HTTP ' + raceResp.status });
+    }
 
-    if (target) {
-      try {
-        const raceResp = await fetch('https://www.racingpost.com' + target.href, {
-          headers: FETCH_HEADERS, redirect: 'follow',
-          signal: AbortSignal.timeout(6000)
-        });
+    const raceHtml = await raceResp.text();
+    result.racePageInfo = {
+      htmlLength: raceHtml.length,
+      hasNextData: /__NEXT_DATA__/.test(raceHtml),
+      hasRSC: /self\.__next_f/.test(raceHtml),
+      scriptCount: (raceHtml.match(/<script/gi) || []).length
+    };
 
-        if (raceResp.ok) {
-          const raceHtml = await raceResp.text();
-          const rndm = raceHtml.match(/<script\s+id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i);
+    // Step 3: Parse __NEXT_DATA__ from race page
+    const rndm = raceHtml.match(/<script\s+id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i);
+    if (rndm) {
+      const raceNextData = JSON.parse(rndm[1]);
+      const racePageProps = raceNextData.props?.pageProps || {};
+      const raceInitialState = racePageProps.initialState || {};
 
-          if (rndm) {
-            const raceNextData = JSON.parse(rndm[1]);
-            const racePageProps = raceNextData.props?.pageProps || {};
-            const raceInitialState = racePageProps.initialState || {};
+      result.racePageKeys = {
+        pagePropsKeys: Object.keys(racePageProps),
+        initialStateKeys: Object.keys(raceInitialState)
+      };
 
-            result.racePage = {
-              url: target.href,
-              slug: target.slug,
-              courseId: target.courseId,
-              pagePropsKeys: Object.keys(racePageProps),
-              initialStateKeys: Object.keys(raceInitialState)
-            };
+      // Show structure of key sections
+      const racePageData = raceInitialState.racePage?.data;
+      if (racePageData) {
+        result.racePageData = {
+          type: typeof racePageData,
+          keys: typeof racePageData === 'object' ? Object.keys(racePageData) : null
+        };
 
-            // Show structure of initialState
-            for (const [k, v] of Object.entries(raceInitialState)) {
-              if (v && typeof v === 'object' && !Array.isArray(v)) {
-                result.racePage['state.' + k + '.keys'] = Object.keys(v).slice(0, 25);
-              } else if (Array.isArray(v)) {
-                result.racePage['state.' + k] = `[Array(${v.length})]`;
-                if (v.length > 0 && v[0] && typeof v[0] === 'object') {
-                  result.racePage['state.' + k + '[0].keys'] = Object.keys(v[0]).slice(0, 30);
+        // Look for runners inside racePage.data
+        if (typeof racePageData === 'object') {
+          for (const [k, v] of Object.entries(racePageData)) {
+            if (Array.isArray(v) && v.length > 0) {
+              const sample = v[0];
+              result.racePageData['array_' + k] = {
+                length: v.length,
+                firstItemKeys: sample && typeof sample === 'object' ? Object.keys(sample) : typeof sample,
+                firstItem: summarize(sample)
+              };
+            } else if (v && typeof v === 'object' && !Array.isArray(v)) {
+              result.racePageData['obj_' + k] = {
+                keys: Object.keys(v).slice(0, 15)
+              };
+              // Check for arrays inside this object
+              for (const [k2, v2] of Object.entries(v)) {
+                if (Array.isArray(v2) && v2.length > 0 && v2[0] && typeof v2[0] === 'object') {
+                  result.racePageData['obj_' + k + '.' + k2] = {
+                    length: v2.length,
+                    firstItemKeys: Object.keys(v2[0]),
+                    firstItem: summarize(v2[0])
+                  };
                 }
               }
             }
+          }
+        }
+      } else {
+        result.racePageData = 'null or undefined';
+        // Look for race data elsewhere
+        result.racePageState = {};
+        for (const [k, v] of Object.entries(raceInitialState)) {
+          if (v && typeof v === 'object') {
+            const keys = Object.keys(v);
+            result.racePageState[k] = keys.length > 10 ? keys.slice(0, 10).concat(['...(' + keys.length + ')']) : keys;
+          }
+        }
+      }
 
-            // Find runner arrays in race page data
-            const raceArrays = findInterestingArrays(raceNextData, 'raceData', 0);
-            raceArrays.sort((a, b) => (b.signals.runner + b.signals.race + b.signals.meeting) - (a.signals.runner + a.signals.race + a.signals.meeting));
-            result.racePage.interestingArrays = raceArrays.slice(0, 8);
+      // Also check pageProps directly for race data
+      result.pagePropsStrings = {};
+      for (const [k, v] of Object.entries(racePageProps)) {
+        if (typeof v === 'string' && v.length > 0 && v.length < 200) {
+          result.pagePropsStrings[k] = v;
+        }
+      }
 
-            // Also try to find race-level info (course, time, etc.)
-            // Look for any string fields at the pageProps level
-            const raceMetadata = {};
-            for (const [k, v] of Object.entries(racePageProps)) {
-              if (typeof v === 'string' && v.length > 0 && v.length < 200) {
-                raceMetadata[k] = v;
-              } else if (typeof v === 'number') {
-                raceMetadata[k] = v;
-              }
-            }
-            if (Object.keys(raceMetadata).length) {
-              result.racePage.metadata = raceMetadata;
-            }
-
-          } else {
-            // Check for RSC on race page
-            const hasRSC = /self\.__next_f/.test(raceHtml);
-            result.racePage = {
-              url: target.href,
-              error: 'No __NEXT_DATA__ on race page',
-              hasRSC,
-              htmlLength: raceHtml.length
-            };
-
-            if (hasRSC) {
-              // Extract RSC and look for data
-              const pushRe = /self\.__next_f\.push\(\[(\d+),"((?:[^"\\]|\\.)*)"\]\)/g;
-              let pm;
-              let rscText = '';
-              while ((pm = pushRe.exec(raceHtml)) !== null) {
-                let unescaped;
-                try { unescaped = JSON.parse('"' + pm[2] + '"'); }
-                catch (e) { unescaped = pm[2].replace(/\\n/g, '\n').replace(/\\\//g, '/'); }
-                rscText += unescaped + '\n';
-              }
-              result.racePage.rscTextLength = rscText.length;
-              result.racePage.rscSample = rscText.substring(0, 3000);
+      // Deep search: find ALL arrays with 3+ objects anywhere in the data
+      const allArrays = [];
+      function deepSearch(obj, path, depth) {
+        if (!obj || typeof obj !== 'object' || depth > 8) return;
+        if (Array.isArray(obj)) {
+          if (obj.length >= 3 && obj[0] && typeof obj[0] === 'object' && !Array.isArray(obj[0])) {
+            const keys = Object.keys(obj[0]);
+            allArrays.push({
+              path,
+              length: obj.length,
+              keys,
+              firstItem: summarize(obj[0])
+            });
+          }
+          for (let i = 0; i < Math.min(obj.length, 2); i++) {
+            if (obj[i] && typeof obj[i] === 'object') {
+              deepSearch(obj[i], path + '[' + i + ']', depth + 1);
             }
           }
         } else {
-          result.racePage = { url: target.href, error: 'HTTP ' + raceResp.status };
+          for (const k of Object.keys(obj)) {
+            if (obj[k] && typeof obj[k] === 'object') {
+              deepSearch(obj[k], path + '.' + k, depth + 1);
+            }
+          }
         }
-      } catch (e) {
-        result.racePage = { error: e.message };
       }
+      deepSearch(raceNextData, 'root', 0);
+      // Sort by most keys (runner arrays tend to have many fields)
+      allArrays.sort((a, b) => b.keys.length - a.keys.length);
+      result.allArraysInRacePage = allArrays.slice(0, 10);
+
+    } else if (/self\.__next_f/.test(raceHtml)) {
+      // RSC fallback
+      result.racePageFormat = 'RSC (no __NEXT_DATA__)';
+      const pushRe = /self\.__next_f\.push\(\[(\d+),"((?:[^"\\]|\\.)*)"\]\)/g;
+      let pm;
+      let rscText = '';
+      let chunkCount = 0;
+      while ((pm = pushRe.exec(raceHtml)) !== null) {
+        let unescaped;
+        try { unescaped = JSON.parse('"' + pm[2] + '"'); }
+        catch (e) { unescaped = pm[2].replace(/\\n/g, '\n').replace(/\\\//g, '/'); }
+        rscText += unescaped + '\n';
+        chunkCount++;
+      }
+      result.rsc = { chunkCount, textLength: rscText.length, sample: rscText.substring(0, 3000) };
+    } else {
+      result.racePageFormat = 'Unknown (no __NEXT_DATA__, no RSC)';
+      // Show some HTML patterns
+      result.htmlSample = raceHtml.substring(0, 2000);
     }
 
     return res.status(200).json(result);
   } catch (err) {
     return res.status(200).json({ error: err.message, stack: err.stack });
   }
+}
+
+function summarize(item) {
+  if (!item || typeof item !== 'object') return item;
+  const s = {};
+  for (const [k, v] of Object.entries(item)) {
+    if (v === null || v === undefined) s[k] = null;
+    else if (typeof v === 'string') s[k] = v.length > 100 ? v.substring(0, 100) + '...' : v;
+    else if (typeof v === 'number' || typeof v === 'boolean') s[k] = v;
+    else if (Array.isArray(v)) s[k] = '[' + v.length + ']';
+    else if (typeof v === 'object') s[k] = '{' + Object.keys(v).slice(0, 6).join(',') + '}';
+  }
+  return s;
 }
